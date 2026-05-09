@@ -455,7 +455,12 @@ def should_merge_lines(current: dict, next_line: dict) -> bool:
     return True
 
 
-def extract_pdf_to_markdown(pdf_path: str, output_path: str = None) -> str:
+def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str = "all") -> str:
+    """
+    images: "all" = extract without filtering (default),
+            "filtered" = extract with size/quality filters,
+            "none" = skip all images
+    """
     """
     Extract text, images, and tables from a PDF and convert to Markdown.
     """
@@ -489,8 +494,6 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None) -> str:
         output_path = Path(output_path)
         rel_img_dir = f"{output_path.stem}_files"
         img_dir = output_path.parent / rel_img_dir
-        if not img_dir.exists():
-            img_dir.mkdir(parents=True, exist_ok=True)
 
     img_count = 0
 
@@ -605,7 +608,9 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None) -> str:
                     })
 
             elif block["type"] == 1:
-                if should_keep_image(block, page.rect, seen_image_hashes):
+                if images == "none":
+                    pass
+                elif images == "all" or should_keep_image(block, page.rect, seen_image_hashes):
                     page_elements.append({
                         "y0": block["bbox"][1],
                         "type": 1,
@@ -714,6 +719,7 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None) -> str:
                     image_path = img_dir / image_name
 
                     try:
+                        img_dir.mkdir(parents=True, exist_ok=True)
                         with open(image_path, "wb") as f:
                             f.write(image_data)
 
@@ -792,6 +798,12 @@ Structure detection features:
 
     parser.add_argument('input', help='PDF file or directory containing PDFs')
     parser.add_argument('-o', '--output', help='Output file or directory')
+    parser.add_argument(
+        '--images',
+        choices=['all', 'filtered', 'none'],
+        default='all',
+        help='Image extraction mode: all=no filtering (default), filtered=apply size/quality filters, none=skip images',
+    )
 
     args = parser.parse_args()
 
@@ -799,7 +811,7 @@ Structure detection features:
 
     if input_path.is_file():
         output = args.output or str(input_path.with_suffix('.md'))
-        extract_pdf_to_markdown(str(input_path), output)
+        extract_pdf_to_markdown(str(input_path), output, images=args.images)
     elif input_path.is_dir():
         process_directory(str(input_path), args.output)
     else:
