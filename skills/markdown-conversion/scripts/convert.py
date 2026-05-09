@@ -26,31 +26,22 @@ def get_script_path(script_name: str) -> Path:
     return SCRIPT_DIR / script_name
 
 
-def run_subprocess(cmd: list[str], label: str) -> None:
-    print(f"[>>] Calling: {label}")
+def run_subprocess(cmd: list[str], label: str) -> int:
+    print(f"[>>] Calling: {label}", flush=True)
     try:
-        subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError as exc:
-        sys.exit(exc.returncode)
+        return subprocess.run(cmd, check=False).returncode
     except KeyboardInterrupt:
-        sys.exit(130)
+        return 130
 
 
-def run_python_script(script_name: str, args: list[str]) -> None:
+def run_python_script(script_name: str, args: list[str]) -> int:
     script_path = get_script_path(script_name)
     if not script_path.exists():
         print(f"Error: Script not found: {script_path}")
-        sys.exit(1)
+        return 1
 
     cmd = [sys.executable, str(script_path)] + args
-    run_subprocess(cmd, f"{script_name} {' '.join(args)}".strip())
-
-
-def directory_contains_subtitles(path: Path) -> bool:
-    try:
-        return any(child.suffix.lower() in SUBTITLE_SUFFIXES for child in path.iterdir() if child.is_file())
-    except OSError:
-        return False
+    return run_subprocess(cmd, f"{script_name} {' '.join(args)}".strip())
 
 
 SKIP_SUFFIXES = MARKDOWN_SUFFIXES | TEXT_SUFFIXES | {".json", ".yaml", ".yml", ".log"}
@@ -76,7 +67,7 @@ def detect_type(input_arg: str) -> str:
         return "unknown"
 
     if path.is_dir():
-        return "subtitle" if directory_contains_subtitles(path) else "dir"
+        return "dir"
 
     suffix = path.suffix.lower()
     if suffix == ".pdf":
@@ -115,19 +106,61 @@ def print_output(path: str) -> None:
     print(f"OUTPUT: {Path(path).resolve()}")
 
 
+def mineru_local_paths(input_arg: str, output: str | None) -> tuple[list[str], Path, Path | None]:
+    """Return MinerU output args, final Markdown path, and an optional generated path to rename."""
+    input_path = Path(input_arg)
+    default_md = input_path.parent / f"{input_path.stem}.md"
+    if not output:
+        return [], default_md, None
+
+    requested = Path(output)
+    if requested.suffix.lower() == ".md":
+        output_dir = requested.parent if str(requested.parent) else Path(".")
+        generated = output_dir / f"{input_path.stem}.md"
+        rename_from = generated if generated.resolve() != requested.resolve() else None
+        return ["-o", str(output_dir)], requested, rename_from
+
+    output_dir = requested
+    return ["-o", str(output_dir)], output_dir / f"{input_path.stem}.md", None
+
+
+def rename_generated_output(generated: Path | None, requested: Path) -> int:
+    if generated is None:
+        return 0
+    if not generated.exists():
+        print(f"[ERROR] Expected MinerU output not found: {generated}")
+        return 1
+    requested.parent.mkdir(parents=True, exist_ok=True)
+    generated.replace(requested)
+    return 0
+
+
+def reserve_batch_output(input_file: Path, out_root: Path, used_names: set[str]) -> Path:
+    out_path = out_root / f"{input_file.stem}.md"
+    if out_path.name in used_names:
+        suffix = input_file.suffix.lower().lstrip(".") or "file"
+        out_path = out_root / f"{input_file.stem}_{suffix}.md"
+        counter = 2
+        while out_path.name in used_names:
+            out_path = out_root / f"{input_file.stem}_{suffix}_{counter}.md"
+            counter += 1
+    used_names.add(out_path.name)
+    return out_path
+
+
 def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser = argparse.ArgumentParser(
         description="Unified Markdown Converter",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python convert.py paper.pdf                 # PDF -> Markdown (local PyMuPDF, default)
-  python convert.py paper.pdf --mineru        # PDF -> Markdown (MinerU cloud high-accuracy)
-  python convert.py https://site.com/article  # Web -> Markdown (Python with curl_cffi)
-  python convert.py report.docx               # Word -> Markdown
-  python convert.py data.xlsx                 # Excel -> Markdown
-  python convert.py deck.pptx                 # PowerPoint -> Markdown
-  python convert.py ./video_course -t sub     # Subtitles -> Markdown
+  python3 convert.py paper.pdf                 # PDF -> Markdown (local PyMuPDF, default)
+  python3 convert.py paper.pdf --mineru        # PDF -> Markdown (MinerU cloud high-accuracy)
+  python3 convert.py https://site.com/article  # Web -> Markdown (Python with curl_cffi)
+  python3 convert.py report.docx               # Word -> Markdown
+  python3 convert.py data.xlsx                 # Excel -> Markdown
+  python3 convert.py deck.pptx                 # PowerPoint -> Markdown
+  python3 convert.py ./video_course -t sub     # Subtitles -> Markdown
         """,
     )
 
@@ -171,22 +204,36 @@ def dispatch_single(input_arg: str, conv_type: str, output: str | None, use_mine
     if conv_type == "pdf":
         is_url = input_arg.startswith(("http://", "https://"))
         route_mineru = use_mineru or is_url
-        out = resolve_output(output, input_arg) if not is_url else output
         if route_mineru:
-            out_args = build_output_args(out)
+            if is_url:
+                out = output
+                out_args = build_output_args(out)
+                rename_from = None
+            else:
+                out_args, out_path, rename_from = mineru_local_paths(input_arg, output)
+                out = str(out_path)
             script_args = (["--url", input_arg] if is_url else [input_arg]) + out_args + unknown_args
-            run_python_script("pdf_to_md_mineru.py", script_args)
+            rc = run_python_script("pdf_to_md_mineru.py", script_args)
         else:
+            out = resolve_output(output, input_arg)
+            rename_from = None
             script_args = [input_arg] + build_output_args(out) + unknown_args
-            run_python_script("pdf_to_md.py", script_args)
-        if out:
+            rc = run_python_script("pdf_to_md.py", script_args)
+        if rc != 0:
+            return rc
+        rc = rename_generated_output(rename_from, Path(out)) if out else 0
+        if rc != 0:
+            return rc
+        if out and not (route_mineru and is_url):
             print_output(out)
         return 0
 
     if conv_type == "web":
         out = output
         script_args = [input_arg] + build_output_args(out)
-        run_python_script("web_to_md.py", script_args)
+        rc = run_python_script("web_to_md.py", script_args)
+        if rc != 0:
+            return rc
         if out:
             print_output(out)
         return 0
@@ -194,30 +241,36 @@ def dispatch_single(input_arg: str, conv_type: str, output: str | None, use_mine
     if conv_type == "doc":
         out = resolve_output(output, input_arg)
         script_args = [input_arg] + build_output_args(out) + unknown_args
-        run_python_script("doc_to_md.py", script_args)
+        rc = run_python_script("doc_to_md.py", script_args)
+        if rc != 0:
+            return rc
         print_output(out)
         return 0
 
     if conv_type == "excel":
         out = resolve_output(output, input_arg)
         script_args = [input_arg] + build_output_args(out) + unknown_args
-        run_python_script("excel_to_md.py", script_args)
+        rc = run_python_script("excel_to_md.py", script_args)
+        if rc != 0:
+            return rc
         print_output(out)
         return 0
 
     if conv_type == "pptx":
         out = resolve_output(output, input_arg)
         script_args = [input_arg] + build_output_args(out) + unknown_args
-        run_python_script("ppt_to_md.py", script_args)
+        rc = run_python_script("ppt_to_md.py", script_args)
+        if rc != 0:
+            return rc
         print_output(out)
         return 0
 
     if conv_type == "subtitle":
         out = resolve_output(output, input_arg) if Path(input_arg).is_file() else output
         script_args = [input_arg] + build_output_args(out) + unknown_args
-        run_python_script("subtitle_to_md.py", script_args)
-        if out and Path(input_arg).is_file():
-            print_output(out)
+        rc = run_python_script("subtitle_to_md.py", script_args)
+        if rc != 0:
+            return rc
         return 0
 
     print(
@@ -239,18 +292,27 @@ def batch_directory(input_dir: str, output_dir: str | None, use_mineru: bool, un
     out_root.mkdir(parents=True, exist_ok=True)
 
     print(f"[INFO] Batch mode: {len(files)} file(s) in {in_path}")
+    succeeded = 0
     failures = 0
+    skipped = 0
+    used_outputs: set[str] = set()
     for i, f in enumerate(files, 1):
         per_type = detect_type(str(f))
         if per_type in {"unknown", "dir"}:
             print(f"  [{i}/{len(files)}] [SKIP] {f.name} (unsupported)")
+            skipped += 1
             continue
-        per_out = str(out_root / (f.stem + ".md"))
+        per_out = str(reserve_batch_output(f, out_root, used_outputs))
         print(f"  [{i}/{len(files)}] {f.name}")
         rc = dispatch_single(str(f), per_type, per_out, use_mineru, unknown_args)
-        if rc != 0:
+        if rc == 0:
+            succeeded += 1
+        else:
             failures += 1
-    print(f"[OK] Batch done: {len(files) - failures}/{len(files)} succeeded")
+    print(
+        f"[OK] Batch done: {succeeded} succeeded, "
+        f"{failures} failed, {skipped} skipped"
+    )
     return failures, out_root
 
 

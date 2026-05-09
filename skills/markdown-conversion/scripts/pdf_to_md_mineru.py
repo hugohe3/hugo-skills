@@ -16,7 +16,7 @@ from pathlib import Path
 
 
 def load_config() -> dict[str, object]:
-    """Load configuration from resources/config.json."""
+    """Load optional local configuration from resources/config.json."""
     config_path = Path(__file__).parent.parent / "resources" / "config.json"
     if config_path.exists():
         with open(config_path, 'r', encoding='utf-8') as f:
@@ -35,8 +35,8 @@ class MinerUClient:
 
         Token lookup order:
         1. The ``token`` argument passed directly.
-        2. ``mineru_api_token`` in resources/config.json.
-        3. Environment variable ``MINERU_API_TOKEN``.
+        2. Environment variable ``MINERU_API_TOKEN``.
+        3. ``mineru_api_token`` in resources/config.json.
 
         Args:
             token: MinerU API token. If omitted, read from config/env.
@@ -45,12 +45,12 @@ class MinerUClient:
             self.token = token
         else:
             config = load_config()
-            self.token = config.get("mineru_api_token") or os.getenv("MINERU_API_TOKEN")
+            self.token = os.getenv("MINERU_API_TOKEN") or config.get("mineru_api_token")
         
         if not self.token:
             raise ValueError(
-                "API token not found. Set MINERU_API_TOKEN env var or add it to "
-                "skills/markdown-conversion/resources/config.json.\n"
+                "API token not found. Set MINERU_API_TOKEN or create "
+                "skills/markdown-conversion/resources/config.json from config.example.json.\n"
                 "Get a token at: https://mineru.net"
             )
         
@@ -599,22 +599,22 @@ def main() -> int:
         epilog='''
 Examples:
   # Convert a local file
-  python pdf_to_md_mineru.py document.pdf
+  python3 pdf_to_md_mineru.py document.pdf
   
   # Convert a URL file
-  python pdf_to_md_mineru.py --url https://example.com/doc.pdf
+  python3 pdf_to_md_mineru.py --url https://example.com/doc.pdf
   
   # Specify output directory
-  python pdf_to_md_mineru.py document.pdf -o ./output
+  python3 pdf_to_md_mineru.py document.pdf -o ./output
   
   # Batch convert
-  python pdf_to_md_mineru.py file1.pdf file2.pdf file3.pdf
+  python3 pdf_to_md_mineru.py file1.pdf file2.pdf file3.pdf
   
   # Use pipeline model (faster but slightly less accurate)
-  python pdf_to_md_mineru.py document.pdf --model pipeline
+  python3 pdf_to_md_mineru.py document.pdf --model pipeline
   
   # Specify page range
-  python pdf_to_md_mineru.py document.pdf --pages 1-10
+  python3 pdf_to_md_mineru.py document.pdf --pages 1-10
 
 Environment variables:
   MINERU_API_TOKEN: API Token (get one at https://mineru.net)
@@ -706,9 +706,9 @@ Environment variables:
         if "user authenticate failed" in error_msg or "401" in error_msg:
             print("\n[TIP] Authentication failed. Please check:")
             print("1. Is the API Token valid? (https://mineru.net)")
-            print("2. Is the token in skills/markdown-conversion/resources/config.json correct?")
+            print("2. Is the token in MINERU_API_TOKEN or resources/config.json correct?")
             print("3. Or use local conversion mode (no token required):")
-            print("   python convert.py <file> --local")
+            print("   python3 convert.py <file>")
             
         return 1
     

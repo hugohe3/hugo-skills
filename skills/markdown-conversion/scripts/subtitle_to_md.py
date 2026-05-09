@@ -11,6 +11,10 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 
+SUBTITLE_SUFFIXES = {'.srt', '.vtt', '.ass'}
+HTML_SUFFIXES = {'.html', '.htm'}
+
+
 class HTMLTextExtractor(HTMLParser):
     """Extract plain text from HTML content."""
     
@@ -114,6 +118,34 @@ def process_vtt_content(content: str) -> str:
     return ' '.join(processed_text)
 
 
+def process_ass_content(content: str) -> str:
+    """Parse ASS subtitle content and return clean transcript text."""
+    processed_text = []
+    in_events = False
+
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.lower() == '[events]':
+            in_events = True
+            continue
+        if in_events and stripped.startswith('['):
+            break
+        if not in_events or not stripped.lower().startswith('dialogue:'):
+            continue
+
+        fields = stripped.split(',', 9)
+        if len(fields) < 10:
+            continue
+        text = fields[-1]
+        text = re.sub(r'\{[^}]*\}', '', text)
+        text = text.replace(r'\N', ' ').replace(r'\n', ' ')
+        text = re.sub(r'\s+', ' ', text).strip()
+        if text:
+            processed_text.append(text)
+
+    return ' '.join(processed_text)
+
+
 def process_file(file_path: Path) -> str:
     """Process a single subtitle file, auto-detecting its format."""
     encodings = ['utf-8', 'gbk', 'latin-1']
@@ -133,12 +165,13 @@ def process_file(file_path: Path) -> str:
 
     suffix = file_path.suffix.lower()
     
-    if suffix == '.html' or suffix == '.htm':
+    if suffix in HTML_SUFFIXES:
         return html_to_text(content)
-    elif suffix == '.vtt' or content.strip().startswith('WEBVTT'):
+    if suffix == '.ass':
+        return process_ass_content(content)
+    if suffix == '.vtt' or content.strip().startswith('WEBVTT'):
         return process_vtt_content(content)
-    else:
-        return process_srt_content(content)
+    return process_srt_content(content)
 
 
 def natural_sort_key(s: str) -> list:
@@ -147,43 +180,116 @@ def natural_sort_key(s: str) -> list:
             for text in re.split(r'(\d+)', str(s))]
 
 
-def convert_subtitles(input_dir: str, output_dir: str | None = None, include_html: bool = False) -> None:
+def collect_input_files(path: Path, include_html: bool) -> list[Path]:
+    suffixes = SUBTITLE_SUFFIXES | (HTML_SUFFIXES if include_html else set())
+    return sorted(
+        (child for child in path.iterdir() if child.is_file() and child.suffix.lower() in suffixes),
+        key=natural_sort_key,
+    )
+
+
+def write_markdown(out_file: Path, title: str, content: str) -> None:
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text(f"# {title}\n\n{content}\n", encoding='utf-8')
+    print(f"[OK] Generated: {out_file}")
+
+
+def reserve_output_path(input_file: Path, out_dir: Path, used_names: set[str]) -> Path:
+    out_path = out_dir / f"{input_file.stem}.md"
+    if out_path.name in used_names:
+        suffix = input_file.suffix.lower().lstrip('.') or 'subtitle'
+        out_path = out_dir / f"{input_file.stem}_{suffix}.md"
+        counter = 2
+        while out_path.name in used_names:
+            out_path = out_dir / f"{input_file.stem}_{suffix}_{counter}.md"
+            counter += 1
+    used_names.add(out_path.name)
+    return out_path
+
+
+def convert_subtitle_file(input_file: str, output_file: str | None = None) -> int:
+    """Convert a single subtitle file to Markdown."""
+    in_path = Path(input_file)
+    if not in_path.exists() or not in_path.is_file():
+        print(f"[ERROR] File not found: {input_file}")
+        return 1
+
+    if in_path.suffix.lower() not in SUBTITLE_SUFFIXES | HTML_SUFFIXES:
+        print(f"[ERROR] Unsupported subtitle format: {in_path.suffix}")
+        return 1
+
+    content = process_file(in_path)
+    if not content:
+        print("[ERROR] No content extracted")
+        return 1
+
+    out_path = Path(output_file) if output_file else in_path.with_suffix('.md')
+    write_markdown(out_path, in_path.stem, content)
+    print(f"OUTPUT: {out_path.resolve()}")
+    return 0
+
+
+def convert_flat_directory(root_path: Path, out_path: Path, include_html: bool) -> int:
+    """Convert subtitle files directly under a directory."""
+    files = collect_input_files(root_path, include_html)
+    if not files:
+        print(f"[ERROR] No subtitle files found in: {root_path}")
+        return 1
+
+    generated = 0
+    used_outputs: set[str] = set()
+    for file_path in files:
+        content = process_file(file_path)
+        if not content:
+            print(f"  [WARN] No content extracted: {file_path.name}")
+            continue
+        write_markdown(reserve_output_path(file_path, out_path, used_outputs), file_path.stem, content)
+        generated += 1
+
+    return 0 if generated else 1
+
+
+def convert_subtitles(input_dir: str, output_dir: str | None = None, include_html: bool = False) -> int:
     """Convert subtitle files in a course directory to Markdown."""
     root_path = Path(input_dir)
     
     if not root_path.exists():
         print(f"[ERROR] Directory not found: {input_dir}")
-        return
+        return 1
+    if not root_path.is_dir():
+        return convert_subtitle_file(input_dir, output_dir)
 
     if output_dir:
         out_path = Path(output_dir)
     else:
         out_path = root_path / "0-srt"
     
-    out_path.mkdir(exist_ok=True)
+    out_path.mkdir(parents=True, exist_ok=True)
 
-    chapter_dirs = [d for d in root_path.iterdir() if d.is_dir() and d.name != '0-srt']
+    if collect_input_files(root_path, include_html):
+        rc = convert_flat_directory(root_path, out_path, include_html)
+        if rc == 0:
+            print(f"[OK] Done. Output: {out_path}")
+        return rc
+
+    output_dir_resolved = out_path.resolve()
+    chapter_dirs = [
+        d for d in root_path.iterdir()
+        if d.is_dir() and d.name != '0-srt' and d.resolve() != output_dir_resolved
+    ]
     chapter_dirs.sort(key=natural_sort_key)
 
     if not chapter_dirs:
-        print(f"[ERROR] No chapter subdirectories found in: {input_dir}")
-        return
+        print(f"[ERROR] No subtitle files or chapter subdirectories found in: {input_dir}")
+        return 1
 
+    generated = 0
     for chapter_dir in chapter_dirs:
         chapter_name = chapter_dir.name
         print(f"[INFO] Processing chapter: {chapter_name}")
 
         markdown_content = f"# {chapter_name}\n\n"
-
-        srt_files = list(chapter_dir.glob('*.srt'))
-        vtt_files = list(chapter_dir.glob('*.vtt'))
-        all_files = srt_files + vtt_files
-        
-        if include_html:
-            html_files = list(chapter_dir.glob('*.html')) + list(chapter_dir.glob('*.htm'))
-            all_files.extend(html_files)
-        
-        all_files.sort(key=natural_sort_key)
+        all_files = collect_input_files(chapter_dir, include_html)
 
         if not all_files:
             print(f"  [SKIP] No subtitle files")
@@ -207,8 +313,10 @@ def convert_subtitles(input_dir: str, output_dir: str | None = None, include_htm
             md_file.write(markdown_content)
 
         print(f"  [OK] Generated: {markdown_path.name}")
+        generated += 1
 
     print(f"[OK] Done. Output: {out_path}")
+    return 0 if generated else 1
 
 
 def main() -> int:
@@ -217,21 +325,21 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
-  python subtitle_to_md.py /path/to/course
-  python subtitle_to_md.py ./my-course -o ./output
-  python subtitle_to_md.py ./course --include-html
+  python3 subtitle_to_md.py lecture.srt
+  python3 subtitle_to_md.py /path/to/course
+  python3 subtitle_to_md.py ./my-course -o ./output
+  python3 subtitle_to_md.py ./course --include-html
         '''
     )
     
-    parser.add_argument('input', help='course directory path')
-    parser.add_argument('-o', '--output', help='output directory (default: <input>/0-srt)')
+    parser.add_argument('input', help='subtitle file or course directory path')
+    parser.add_argument('-o', '--output', help='output Markdown file for file input, or output directory for directory input')
     parser.add_argument('--include-html', action='store_true', 
                         help='also include HTML files')
     
     args = parser.parse_args()
     
-    convert_subtitles(args.input, args.output, args.include_html)
-    return 0
+    return convert_subtitles(args.input, args.output, args.include_html)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+
+# Local secrets
+skills/markdown-conversion/resources/config.json

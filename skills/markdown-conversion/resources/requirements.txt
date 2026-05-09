@@ -8,23 +8,23 @@
 # the only hard requirements (PDF parsing + MinerU/web HTTP).
 
 # --- Core (always required) ---
-PyMuPDF>=1.23.0          # pdf_to_md.py
-requests>=2.31.0         # pdf_to_md_mineru.py, web_to_md.py fallback
+PyMuPDF>=1.23.0,<2       # pdf_to_md.py
+requests>=2.31.0,<3      # pdf_to_md_mineru.py, web_to_md.py fallback
 
 # --- Document formats (doc_to_md.py native fast path) ---
-mammoth                  # .docx
-markdownify              # .html / .epub / web pages
-beautifulsoup4           # .html / web pages
-ebooklib                 # .epub
-nbconvert                # .ipynb
+mammoth>=1.6,<2          # .docx
+markdownify>=0.11,<1     # .html / .epub / web pages
+beautifulsoup4>=4.12,<5  # .html / web pages
+ebooklib>=0.18,<1        # .epub
+nbconvert>=7,<8          # .ipynb
 
 # --- Spreadsheet / slide deck ---
-openpyxl                 # .xlsx / .xlsm
-python-pptx              # .pptx / .pptm / .ppsx / .potx
+openpyxl>=3.1,<4         # .xlsx / .xlsm
+python-pptx>=0.6,<2      # .pptx / .pptm / .ppsx / .potx
 
 # --- Web fetching ---
-curl_cffi                # TLS impersonation (WeChat, Cloudflare-protected sites)
-pillow                   # image post-processing for web_to_md.py
+curl_cffi>=0.6,<1        # TLS impersonation (WeChat, Cloudflare-protected sites)
+pillow>=10,<12           # image post-processing for web_to_md.py
 
 # --- System binary (not pip-installable, optional) ---
 # pandoc — required only for .doc / .odt / .rtf / .tex / .rst / .org / .typ

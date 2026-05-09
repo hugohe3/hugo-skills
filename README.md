@@ -42,7 +42,7 @@ skills/
   markdown-conversion/
     SKILL.md              # Skill manifest — Claude reads this
     scripts/              # Python converters (one per format)
-    resources/            # requirements.txt, config.json
+    resources/            # requirements.txt, config.example.json
 ```
 
 ## Contributing

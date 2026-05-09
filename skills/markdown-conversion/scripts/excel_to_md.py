@@ -338,9 +338,9 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python excel_to_md.py report.xlsx
-  python excel_to_md.py report.xlsx -o output.md
-  python excel_to_md.py report.xlsm --max-rows 200 --max-cols 40
+  python3 excel_to_md.py report.xlsx
+  python3 excel_to_md.py report.xlsx -o output.md
+  python3 excel_to_md.py report.xlsm --max-rows 200 --max-cols 40
 
 Supported formats:
   .xlsx  .xlsm

@@ -785,10 +785,10 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
-  python pdf_to_md.py book.pdf                    # Convert a single file
-  python pdf_to_md.py book.pdf -o output.md      # Specify output file
-  python pdf_to_md.py ./pdfs                      # Convert all PDFs in directory
-  python pdf_to_md.py ./pdfs -o ./markdown       # Specify output directory
+  python3 pdf_to_md.py book.pdf                    # Convert a single file
+  python3 pdf_to_md.py book.pdf -o output.md      # Specify output file
+  python3 pdf_to_md.py ./pdfs                      # Convert all PDFs in directory
+  python3 pdf_to_md.py ./pdfs -o ./markdown       # Specify output directory
 
 Structure detection features:
   - Auto-detect heading levels (based on font size)

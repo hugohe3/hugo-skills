@@ -492,18 +492,26 @@ def convert_to_markdown(input_path: str, output_path: str | None = None) -> str:
     if suffix in NATIVE_FORMATS:
         desc = _FORMAT_DESC[suffix]
         print(f"[INFO] Converting {desc}: {input_file.name}")
-        if suffix == ".docx":
-            return _convert_docx(input_file, out_file)
-        if suffix in (".html", ".htm"):
-            return _convert_html(input_file, out_file)
-        if suffix == ".epub":
-            return _convert_epub(input_file, out_file)
-        if suffix == ".ipynb":
-            return _convert_ipynb(input_file, out_file)
+        try:
+            if suffix == ".docx":
+                return _convert_docx(input_file, out_file)
+            if suffix in (".html", ".htm"):
+                return _convert_html(input_file, out_file)
+            if suffix == ".epub":
+                return _convert_epub(input_file, out_file)
+            if suffix == ".ipynb":
+                return _convert_ipynb(input_file, out_file)
+        except Exception as exc:
+            print(f"[ERROR] Conversion failed: {exc}")
+            return ""
 
     _, format_desc = PANDOC_FORMATS[suffix]
     print(f"[INFO] Converting {format_desc} via pandoc: {input_file.name}")
-    return _convert_with_pandoc(input_file, out_file, suffix)
+    try:
+        return _convert_with_pandoc(input_file, out_file, suffix)
+    except Exception as exc:
+        print(f"[ERROR] Conversion failed: {exc}")
+        return ""
 
 
 def main() -> None:
@@ -513,11 +521,11 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python doc_to_md.py lecture.docx                # Word → Markdown (mammoth)
-  python doc_to_md.py article.html                # HTML → Markdown (markdownify)
-  python doc_to_md.py book.epub                   # EPUB → Markdown (ebooklib)
-  python doc_to_md.py notebook.ipynb              # Jupyter → Markdown (nbconvert)
-  python doc_to_md.py manuscript.tex              # LaTeX → Markdown (pandoc fallback)
+  python3 doc_to_md.py lecture.docx                # Word → Markdown (mammoth)
+  python3 doc_to_md.py article.html                # HTML → Markdown (markdownify)
+  python3 doc_to_md.py book.epub                   # EPUB → Markdown (ebooklib)
+  python3 doc_to_md.py notebook.ipynb              # Jupyter → Markdown (nbconvert)
+  python3 doc_to_md.py manuscript.tex              # LaTeX → Markdown (pandoc fallback)
 
 Native formats (no pandoc required):
   .docx  .html/.htm  .epub  .ipynb

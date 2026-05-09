@@ -292,11 +292,11 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python ppt_to_md.py slides.pptx
-  python ppt_to_md.py slides.pptx -o output.md
-  python ppt_to_md.py ./decks
-  python ppt_to_md.py ./decks -o ./markdown
-  python ppt_to_md.py deck.ppsx -o notes/deck.md
+  python3 ppt_to_md.py slides.pptx
+  python3 ppt_to_md.py slides.pptx -o output.md
+  python3 ppt_to_md.py ./decks
+  python3 ppt_to_md.py ./decks -o ./markdown
+  python3 ppt_to_md.py deck.ppsx -o notes/deck.md
 
 Supported formats:
   .pptx  .pptm  .ppsx  .ppsm  .potx  .potm
