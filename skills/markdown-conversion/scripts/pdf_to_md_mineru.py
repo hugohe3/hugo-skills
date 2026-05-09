@@ -648,6 +648,23 @@ Environment variables:
         "page_ranges": args.pages
     }
     
+    if args.files:
+        try:
+            import fitz  # PyMuPDF
+            for f in args.files:
+                if Path(f).is_file() and Path(f).suffix.lower() == ".pdf":
+                    try:
+                        with fitz.open(f) as _doc:
+                            n = len(_doc)
+                        if n >= 200:
+                            print(f"[HINT] {Path(f).name}: {n} pages — for very large PDFs, "
+                                  f"consider splitting the source by chapter beforehand "
+                                  f"(e.g. with pdftk / qpdf / PyPDF2) and converting each part individually.")
+                    except Exception:
+                        pass
+        except ImportError:
+            pass
+
     try:
         if args.url:
             # URL mode

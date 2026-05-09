@@ -2,14 +2,15 @@
 name: markdown-conversion
 description: >
   Convert source documents (PDF / Word / Excel / PowerPoint / EPUB / HTML / Jupyter /
-  subtitles / web URL) into clean Markdown with images extracted alongside. Use when
-  the user asks to turn a document into Markdown, "extract text from a PDF", "把文档转成 md",
-  "网页转 markdown", or prepares source material for downstream AI workflows.
+  subtitles / web URL) into clean Markdown with images extracted alongside, ready for
+  AI to read. Also batch-converts whole directories. Use when the user asks to turn
+  a document into Markdown, "extract text from a PDF", "把文档转成 md", "网页转 markdown",
+  "批量转 md", or prepares source material for downstream AI workflows.
 ---
 
 # Markdown Conversion
 
-Takes one input — file, directory, or URL — and writes a single `.md` next to it (plus a sibling `<stem>_files/` folder for extracted images, when relevant).
+Turn any supported source — a file, directory, or URL — into clean Markdown that an LLM can read. Each input becomes one `.md` (plus a sibling `<stem>_files/` folder for extracted images, when relevant).
 
 ## Quick start
 
@@ -32,7 +33,19 @@ python scripts/convert.py deck.pptx                  # PowerPoint
 python scripts/convert.py book.epub                  # EPUB
 python scripts/convert.py https://example.com/post   # Web page
 python scripts/convert.py ./course_dir -t sub        # Subtitle batch
+python scripts/convert.py ./mixed_docs               # Directory batch (any supported types)
 ```
+
+## Batch directory conversion
+
+`convert.py` accepts a directory and converts every supported file inside it (one level deep). Each file is dispatched to its own converter and written as `<stem>.md` next to the input (or under `-o`).
+
+```bash
+python scripts/convert.py ./mixed_docs               # convert each file in place
+python scripts/convert.py ./mixed_docs -o ./out      # write all .md into ./out/
+```
+
+For a very large PDF (book / long report), pre-split it with `pdftk`, `qpdf`, or PyPDF2 and feed the parts to `convert.py` — converters will also print a hint when a single PDF crosses ~200 pages.
 
 ## Supported sources
 
@@ -84,14 +97,11 @@ MinerU needs an API token in `resources/config.json` (`{"mineru_api_token": "...
 
 `web_to_md.py` covers all URLs. With `curl_cffi` installed it impersonates Chrome's TLS fingerprint and can fetch WeChat Official Accounts (`mp.weixin.qq.com`) and other sites that block Python's default fingerprint — no flag needed. Without `curl_cffi`, it falls back to plain `requests` (sufficient for most public sites).
 
-## Utilities
+## Diagnostics
 
-| Script | Purpose |
-|---|---|
-| `split_pdf.py <file.pdf>` | Split a PDF by detected chapters |
-| `split_md.py <file.md>` | Split a long Markdown file by headings |
-| `merge_md.py <dir/>` | Merge Markdown files in a directory |
-| `check_env.py` | Verify Python packages, pandoc, MinerU token |
+```bash
+python scripts/check_env.py    # per-format readiness table: Python deps, pandoc, MinerU token
+```
 
 ## Setup
 

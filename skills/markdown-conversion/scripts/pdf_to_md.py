@@ -470,6 +470,11 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str 
         print(f"[ERROR] Failed to open PDF file: {e}")
         return ""
 
+    if len(doc) >= 200:
+        print(f"[HINT] {len(doc)} pages — for very large PDFs, consider splitting "
+              f"the source by chapter beforehand (e.g. with pdftk / qpdf / PyPDF2) "
+              f"and converting each part individually.")
+
     filename = Path(pdf_path).stem
     title = re.sub(r'^\d+-', '', filename).strip()
 

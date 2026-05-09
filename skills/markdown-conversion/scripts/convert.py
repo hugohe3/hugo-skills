@@ -53,6 +53,19 @@ def directory_contains_subtitles(path: Path) -> bool:
         return False
 
 
+SKIP_SUFFIXES = MARKDOWN_SUFFIXES | TEXT_SUFFIXES | {".json", ".yaml", ".yml", ".log"}
+
+
+def list_convertible_files(path: Path) -> list[Path]:
+    """Return convertible files in a directory (one level), skipping md/txt/hidden/etc."""
+    return sorted(
+        f for f in path.iterdir()
+        if f.is_file()
+        and not f.name.startswith(".")
+        and f.suffix.lower() not in SKIP_SUFFIXES
+    )
+
+
 def detect_type(input_arg: str) -> str:
     """Detect the input type from a file path, directory, or URL."""
     if input_arg.startswith(("http://", "https://")):
@@ -135,6 +148,112 @@ Examples:
     return parser.parse_known_args()
 
 
+def dispatch_single(input_arg: str, conv_type: str, output: str | None, use_mineru: bool, unknown_args: list[str]) -> int:
+    """Dispatch one input (single file or URL) to the right converter. Returns exit code."""
+    if conv_type == "sub":
+        conv_type = "subtitle"
+    if conv_type == "pdf_url":
+        conv_type = "pdf"
+
+    if conv_type == "markdown":
+        print(f"[OK] Input is already Markdown: {input_arg}")
+        print_output(input_arg)
+        return 0
+
+    if conv_type == "text":
+        out = resolve_output(output, input_arg)
+        src = Path(input_arg).read_text(encoding="utf-8", errors="replace")
+        Path(out).write_text(src, encoding="utf-8")
+        print(f"[OK] Plain text copied as Markdown: {out}")
+        print_output(out)
+        return 0
+
+    if conv_type == "pdf":
+        is_url = input_arg.startswith(("http://", "https://"))
+        route_mineru = use_mineru or is_url
+        out = resolve_output(output, input_arg) if not is_url else output
+        if route_mineru:
+            out_args = build_output_args(out)
+            script_args = (["--url", input_arg] if is_url else [input_arg]) + out_args + unknown_args
+            run_python_script("pdf_to_md_mineru.py", script_args)
+        else:
+            script_args = [input_arg] + build_output_args(out) + unknown_args
+            run_python_script("pdf_to_md.py", script_args)
+        if out:
+            print_output(out)
+        return 0
+
+    if conv_type == "web":
+        out = output
+        script_args = [input_arg] + build_output_args(out)
+        run_python_script("web_to_md.py", script_args)
+        if out:
+            print_output(out)
+        return 0
+
+    if conv_type == "doc":
+        out = resolve_output(output, input_arg)
+        script_args = [input_arg] + build_output_args(out) + unknown_args
+        run_python_script("doc_to_md.py", script_args)
+        print_output(out)
+        return 0
+
+    if conv_type == "excel":
+        out = resolve_output(output, input_arg)
+        script_args = [input_arg] + build_output_args(out) + unknown_args
+        run_python_script("excel_to_md.py", script_args)
+        print_output(out)
+        return 0
+
+    if conv_type == "pptx":
+        out = resolve_output(output, input_arg)
+        script_args = [input_arg] + build_output_args(out) + unknown_args
+        run_python_script("ppt_to_md.py", script_args)
+        print_output(out)
+        return 0
+
+    if conv_type == "subtitle":
+        out = resolve_output(output, input_arg) if Path(input_arg).is_file() else output
+        script_args = [input_arg] + build_output_args(out) + unknown_args
+        run_python_script("subtitle_to_md.py", script_args)
+        if out and Path(input_arg).is_file():
+            print_output(out)
+        return 0
+
+    print(
+        f"Error: Could not determine conversion type for '{input_arg}'. "
+        "Please use -t/--type to specify one of: pdf, doc, excel, pptx, web, sub."
+    )
+    return 1
+
+
+def batch_directory(input_dir: str, output_dir: str | None, use_mineru: bool, unknown_args: list[str]) -> tuple[int, Path]:
+    """Convert every convertible file in a directory. Returns (failures, output_root)."""
+    in_path = Path(input_dir)
+    files = list_convertible_files(in_path)
+    out_root = Path(output_dir) if output_dir else in_path
+    if not files:
+        print(f"[ERROR] No convertible files in directory: {input_dir}")
+        return 1, out_root
+
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    print(f"[INFO] Batch mode: {len(files)} file(s) in {in_path}")
+    failures = 0
+    for i, f in enumerate(files, 1):
+        per_type = detect_type(str(f))
+        if per_type in {"unknown", "dir"}:
+            print(f"  [{i}/{len(files)}] [SKIP] {f.name} (unsupported)")
+            continue
+        per_out = str(out_root / (f.stem + ".md"))
+        print(f"  [{i}/{len(files)}] {f.name}")
+        rc = dispatch_single(str(f), per_type, per_out, use_mineru, unknown_args)
+        if rc != 0:
+            failures += 1
+    print(f"[OK] Batch done: {len(files) - failures}/{len(files)} succeeded")
+    return failures, out_root
+
+
 def main() -> int:
     args, unknown_args = parse_args()
     conv_type = args.type
@@ -142,83 +261,11 @@ def main() -> int:
     if conv_type == "auto":
         conv_type = detect_type(args.input)
 
-    if conv_type == "sub":
-        conv_type = "subtitle"
+    if conv_type == "dir":
+        failures, _ = batch_directory(args.input, args.output, args.mineru, unknown_args)
+        return 0 if failures == 0 else 1
 
-    if conv_type == "markdown":
-        print(f"[OK] Input is already Markdown: {args.input}")
-        print_output(args.input)
-        return 0
-
-    if conv_type == "pdf_url":
-        conv_type = "pdf"
-
-    if conv_type == "text":
-        out = resolve_output(args.output, args.input)
-        src = Path(args.input).read_text(encoding="utf-8", errors="replace")
-        Path(out).write_text(src, encoding="utf-8")
-        print(f"[OK] Plain text copied as Markdown: {out}")
-        print_output(out)
-        return 0
-
-    if conv_type == "pdf":
-        is_url = args.input.startswith(("http://", "https://"))
-        use_mineru = args.mineru or is_url
-        out = resolve_output(args.output, args.input) if not is_url else args.output
-        if use_mineru:
-            out_args = build_output_args(out)
-            script_args = (["--url", args.input] if is_url else [args.input]) + out_args + unknown_args
-            run_python_script("pdf_to_md_mineru.py", script_args)
-        else:
-            script_args = [args.input] + build_output_args(out) + unknown_args
-            run_python_script("pdf_to_md.py", script_args)
-        if out:
-            print_output(out)
-        return 0
-
-    if conv_type == "web":
-        out = args.output
-        script_args = [args.input] + build_output_args(out)
-        run_python_script("web_to_md.py", script_args)
-        if out:
-            print_output(out)
-        return 0
-
-    if conv_type in {"doc", "dir"}:
-        out = resolve_output(args.output, args.input) if conv_type == "doc" else args.output
-        script_args = [args.input] + build_output_args(out) + unknown_args
-        run_python_script("doc_to_md.py", script_args)
-        if out and conv_type == "doc":
-            print_output(out)
-        return 0
-
-    if conv_type == "excel":
-        out = resolve_output(args.output, args.input)
-        script_args = [args.input] + build_output_args(out) + unknown_args
-        run_python_script("excel_to_md.py", script_args)
-        print_output(out)
-        return 0
-
-    if conv_type == "pptx":
-        out = resolve_output(args.output, args.input)
-        script_args = [args.input] + build_output_args(out) + unknown_args
-        run_python_script("ppt_to_md.py", script_args)
-        print_output(out)
-        return 0
-
-    if conv_type == "subtitle":
-        out = resolve_output(args.output, args.input) if Path(args.input).is_file() else args.output
-        script_args = [args.input] + build_output_args(out) + unknown_args
-        run_python_script("subtitle_to_md.py", script_args)
-        if out and Path(args.input).is_file():
-            print_output(out)
-        return 0
-
-    print(
-        f"Error: Could not determine conversion type for '{args.input}'. "
-        "Please use -t/--type to specify one of: pdf, doc, excel, pptx, web, sub."
-    )
-    return 1
+    return dispatch_single(args.input, conv_type, args.output, args.mineru, unknown_args)
 
 
 if __name__ == "__main__":

@@ -95,7 +95,6 @@ def package_available(import_name: str) -> bool:
 def print_capability_status() -> None:
     fitz_ok = package_available("fitz")
     requests_ok = package_available("requests")
-    pypdf_ok = package_available("PyPDF2")
     mammoth_ok = package_available("mammoth")
     bs4_ok = package_available("bs4")
     markdownify_ok = package_available("markdownify")
@@ -128,7 +127,6 @@ def print_capability_status() -> None:
     print(f"Excel: {'READY' if openpyxl_ok else 'MISSING openpyxl'}")
     print(f"PowerPoint: {'READY' if pptx_ok else 'MISSING python-pptx'}")
     print(f"Web: {'READY' if requests_ok else 'MISSING requests'}{' + curl_cffi (TLS impersonation)' if curl_cffi_ok else ''}")
-    print(f"Split / Merge helpers: {'READY' if pypdf_ok else 'MISSING PyPDF2'}")
 
 
 def main() -> int:
@@ -146,7 +144,6 @@ def main() -> int:
     required_packages = [
         ("PyMuPDF", "fitz"),
         ("requests", "requests"),
-        ("PyPDF2", "PyPDF2"),
     ]
     for pkg, import_name in required_packages:
         if not check_python_package(pkg, import_name):

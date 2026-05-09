@@ -10,7 +10,6 @@
 # --- Core (always required) ---
 PyMuPDF>=1.23.0          # pdf_to_md.py
 requests>=2.31.0         # pdf_to_md_mineru.py, web_to_md.py fallback
-PyPDF2>=3.0.0            # split_pdf.py
 
 # --- Document formats (doc_to_md.py native fast path) ---
 mammoth                  # .docx
