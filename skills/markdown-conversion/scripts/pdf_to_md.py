@@ -456,13 +456,11 @@ def should_merge_lines(current: dict, next_line: dict) -> bool:
 
 
 def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str = "all") -> str:
-    """
+    """Extract text, images, and tables from a PDF and convert to Markdown.
+
     images: "all" = extract without filtering (default),
             "filtered" = extract with size/quality filters,
             "none" = skip all images
-    """
-    """
-    Extract text, images, and tables from a PDF and convert to Markdown.
     """
     try:
         doc = fitz.open(pdf_path)
@@ -755,12 +753,13 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str 
     return markdown_content
 
 
-def process_directory(input_dir: str, output_dir: str | None = None) -> None:
+def process_directory(input_dir: str, output_dir: str | None = None, images: str = "all") -> None:
     """Convert all PDFs in a directory to Markdown.
 
     Args:
         input_dir: Directory containing PDF files.
         output_dir: Optional output directory for Markdown files.
+        images: Image extraction mode passed to extract_pdf_to_markdown.
     """
     input_path = Path(input_dir)
 
@@ -776,7 +775,7 @@ def process_directory(input_dir: str, output_dir: str | None = None) -> None:
     for pdf_file in pdf_files:
         output_file = output_path / (pdf_file.stem + '.md')
         print(f"Processing: {pdf_file.name}")
-        extract_pdf_to_markdown(str(pdf_file), str(output_file))
+        extract_pdf_to_markdown(str(pdf_file), str(output_file), images=images)
 
 
 def main() -> int:
@@ -818,7 +817,7 @@ Structure detection features:
         output = args.output or str(input_path.with_suffix('.md'))
         extract_pdf_to_markdown(str(input_path), output, images=args.images)
     elif input_path.is_dir():
-        process_directory(str(input_path), args.output)
+        process_directory(str(input_path), args.output, images=args.images)
     else:
         print(f"Error: File or directory not found: {args.input}")
         return 1
