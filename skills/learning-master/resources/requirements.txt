@@ -1,0 +1,6 @@
+# Learning Master — dependencies
+#
+# Install:
+#     pip install -r resources/requirements.txt
+
+Markdown>=3.6,<4

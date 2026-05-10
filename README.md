@@ -10,6 +10,7 @@
 
 | 技能 | 说明 |
 |---|---|
+| [learning-master](skills/learning-master/SKILL.md) | 六阶段学习助手，用于系统化学习课程、书籍和文章，生成学习计划、笔记、Anki 卡片和外化产出 |
 | [markdown-conversion](skills/markdown-conversion/SKILL.md) | 将 PDF / Word / Excel / PowerPoint / EPUB / HTML / 字幕 / 网页 URL 转换为干净的 Markdown，供 LLM 读取 |
 
 ## 使用方法
@@ -22,6 +23,10 @@
     {
       "type": "file",
       "path": "/path/to/hugo-skills/skills/markdown-conversion/SKILL.md"
+    },
+    {
+      "type": "file",
+      "path": "/path/to/hugo-skills/skills/learning-master/SKILL.md"
     }
   ]
 }
@@ -31,14 +36,20 @@
 
 ```bash
 claude skills add /path/to/hugo-skills/skills/markdown-conversion/SKILL.md
+claude skills add /path/to/hugo-skills/skills/learning-master/SKILL.md
 ```
 
-添加后，Claude 会在你要求转换文档时自动调用该技能。
+添加后，Claude 会在你要求转换文档或管理系统化学习项目时自动调用相应技能。
 
 ## 仓库结构
 
 ```
 skills/
+  learning-master/
+    SKILL.md              # 技能清单——Claude 读取此文件
+    scripts/              # Anki 卡片导出脚本
+    templates/            # 六阶段学习模板
+    resources/            # requirements.txt
   markdown-conversion/
     SKILL.md              # 技能清单——Claude 读取此文件
     scripts/              # Python 转换器（每种格式一个）
