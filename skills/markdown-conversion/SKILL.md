@@ -8,127 +8,127 @@ description: >
   "批量转 md", or prepares source material for downstream AI workflows.
 ---
 
-# Markdown Conversion
+# Markdown 转换
 
-Turn any supported source — a file, directory, or URL — into clean Markdown that an LLM can read. Each input becomes one `.md` (plus a sibling `<stem>_files/` folder for extracted images, when relevant).
+将任意支持的来源——文件、目录或 URL——转换为 LLM 可读的干净 Markdown。每个输入生成一个 `.md` 文件（以及提取图片时相应的 `<stem>_files/` 文件夹）。
 
-## Quick start
+## 快速开始
 
-The unified dispatcher auto-detects the input type:
+统一调度器会自动识别输入类型：
 
 ```bash
-python3 scripts/convert.py <file_or_url>
+python3 scripts/convert.py <文件或URL>
 ```
 
-Default output: `<input_dir>/<stem>.md`.
-Override file output with `-o <output.md>` for local file inputs; for directory inputs, `-o` is an output directory.
-When the dispatcher knows the exact Markdown file path, it prints `OUTPUT: /abs/path/output.md` on success.
+默认输出：`<输入目录>/<文件名>.md`。
+本地文件可用 `-o <output.md>` 指定输出路径；目录输入时，`-o` 为输出目录。
+调度器成功后会打印 `OUTPUT: /绝对路径/output.md`。
 
 ```bash
-python3 scripts/convert.py paper.pdf                  # PDF (local PyMuPDF)
-python3 scripts/convert.py paper.pdf --mineru         # PDF (MinerU cloud OCR)
+python3 scripts/convert.py paper.pdf                  # PDF（本地 PyMuPDF）
+python3 scripts/convert.py paper.pdf --mineru         # PDF（MinerU 云端 OCR）
 python3 scripts/convert.py report.docx                # Word
 python3 scripts/convert.py data.xlsx                  # Excel
 python3 scripts/convert.py deck.pptx                  # PowerPoint
 python3 scripts/convert.py book.epub                  # EPUB
-python3 scripts/convert.py https://example.com/post   # Web page
-python3 scripts/convert.py ./course_dir -t sub        # Subtitle batch
-python3 scripts/convert.py ./mixed_docs               # Directory batch (any supported types)
+python3 scripts/convert.py https://example.com/post   # 网页
+python3 scripts/convert.py ./course_dir -t sub        # 字幕批量
+python3 scripts/convert.py ./mixed_docs               # 目录批量（所有支持类型）
 ```
 
-## Batch directory conversion
+## 批量目录转换
 
-`convert.py` accepts a directory and converts every supported file inside it (one level deep). Each file is dispatched to its own converter and written as `<stem>.md` next to the input (or under `-o`).
+`convert.py` 接受目录参数，转换其中所有支持的文件（一层深度）。每个文件由对应转换器处理，输出为 `<文件名>.md`（或写入 `-o` 指定目录）。
 
 ```bash
-python3 scripts/convert.py ./mixed_docs               # convert each file in place
-python3 scripts/convert.py ./mixed_docs -o ./out      # write all .md into ./out/
+python3 scripts/convert.py ./mixed_docs               # 原位转换每个文件
+python3 scripts/convert.py ./mixed_docs -o ./out      # 所有 .md 写入 ./out/
 ```
 
-Batch mode continues after per-file failures and prints succeeded / failed / skipped counts.
+批量模式在单文件失败后继续运行，最后打印成功 / 失败 / 跳过计数。
 
-For a very large PDF (book / long report), pre-split it with `pdftk`, `qpdf`, or PyPDF2 and feed the parts to `convert.py` — converters will also print a hint when a single PDF crosses ~200 pages.
+超大 PDF（书籍/长报告）可先用 `pdftk`、`qpdf` 或 PyPDF2 拆分再转换——单个 PDF 超过约 200 页时转换器也会提示。
 
-## Supported sources
+## 支持的来源
 
-| Category | Extensions / inputs | Converter |
+| 类型 | 扩展名 / 输入 | 转换器 |
 |---|---|---|
-| PDF (text) | `.pdf` | `pdf_to_md.py` (PyMuPDF) |
-| PDF (scanned, math-heavy, complex layout) | `.pdf` + `--mineru` | `pdf_to_md_mineru.py` |
-| Word / EPUB / HTML / Jupyter | `.docx` `.epub` `.html` `.htm` `.ipynb` | `doc_to_md.py` (native) |
-| Other office / academic | `.doc` `.odt` `.rtf` `.tex` `.rst` `.org` `.typ` | `doc_to_md.py` (pandoc fallback) |
-| Spreadsheet | `.xlsx` `.xlsm` | `excel_to_md.py` |
-| Slide deck | `.pptx` `.pptm` `.ppsx` `.ppsm` `.potx` `.potm` | `ppt_to_md.py` |
-| Subtitles | `.srt` `.vtt` `.ass` (single file, flat directory, or course directory) | `subtitle_to_md.py` |
-| Web page | `http://` / `https://` | `web_to_md.py` (Python, curl_cffi) |
-| Plain text | `.txt` | passthrough |
-| Already Markdown | `.md` `.markdown` | passthrough |
+| PDF（文本型） | `.pdf` | `pdf_to_md.py`（PyMuPDF） |
+| PDF（扫描件、公式密集、复杂排版） | `.pdf` + `--mineru` | `pdf_to_md_mineru.py` |
+| Word / EPUB / HTML / Jupyter | `.docx` `.epub` `.html` `.htm` `.ipynb` | `doc_to_md.py`（原生） |
+| 其他办公 / 学术格式 | `.doc` `.odt` `.rtf` `.tex` `.rst` `.org` `.typ` | `doc_to_md.py`（pandoc 回退） |
+| 电子表格 | `.xlsx` `.xlsm` | `excel_to_md.py` |
+| 幻灯片 | `.pptx` `.pptm` `.ppsx` `.ppsm` `.potx` `.potm` | `ppt_to_md.py` |
+| 字幕 | `.srt` `.vtt` `.ass`（单文件、平级目录或课程目录） | `subtitle_to_md.py` |
+| 网页 | `http://` / `https://` | `web_to_md.py`（Python，curl_cffi） |
+| 纯文本 | `.txt` | 直通 |
+| 已是 Markdown | `.md` `.markdown` | 直通 |
 
-`.xls` and legacy `.ppt` are not parsed directly — resave as `.xlsx` / `.pptx` first. `.doc` works through the pandoc fallback.
+`.xls` 和旧版 `.ppt` 不直接解析——请先另存为 `.xlsx` / `.pptx`。`.doc` 通过 pandoc 回退处理。
 
-## Calling a converter directly
+## 直接调用转换器
 
-`convert.py` is the recommended entry point, but every backend is also a standalone CLI:
+`convert.py` 是推荐入口，但每个后端也可作为独立 CLI 使用：
 
 ```bash
 python3 scripts/pdf_to_md.py book.pdf
-python3 scripts/pdf_to_md_mineru.py scan.pdf            # needs MINERU_API_TOKEN
-python3 scripts/doc_to_md.py paper.tex                  # uses pandoc
+python3 scripts/pdf_to_md_mineru.py scan.pdf            # 需要 MINERU_API_TOKEN
+python3 scripts/doc_to_md.py paper.tex                  # 使用 pandoc
 python3 scripts/excel_to_md.py report.xlsm --max-rows 200 --max-cols 40
 python3 scripts/ppt_to_md.py deck.pptx
 python3 scripts/web_to_md.py https://mp.weixin.qq.com/s/xxxx
 python3 scripts/subtitle_to_md.py lecture.srt
 ```
 
-Each script writes `<input>.md` plus `<input>_files/` for embedded images, with relative references in the Markdown.
+每个脚本输出 `<输入>.md` 及嵌入图片的 `<输入>_files/`，Markdown 中使用相对路径引用。
 
-## Choosing between PDF backends
+## 选择 PDF 后端
 
-Always start with the local parser. Switch only after inspecting the output.
+始终先用本地解析器，检查输出后再决定是否切换。
 
-| Situation | Action |
+| 情况 | 操作 |
 |---|---|
-| Output is readable | Done — keep the local result |
-| Garbled text, broken reading order, missing content | Re-run with `--mineru` |
-| Scanned PDF, image-only PDF | Use `--mineru` directly |
-| PDF from a URL | `convert.py` routes to MinerU automatically |
+| 输出可读 | 完成——保留本地结果 |
+| 乱码、阅读顺序混乱、内容缺失 | 改用 `--mineru` 重新运行 |
+| 扫描件、纯图片 PDF | 直接使用 `--mineru` |
+| 来自 URL 的 PDF | `convert.py` 自动路由到 MinerU |
 
-MinerU needs `MINERU_API_TOKEN` or a local, gitignored `resources/config.json` copied from `resources/config.example.json`.
+MinerU 需要 `MINERU_API_TOKEN`，或将 `resources/config.example.json` 复制为 gitignore 的 `resources/config.json` 并填入 token。
 
-## Web fetching
+## 网页抓取
 
-`web_to_md.py` covers all URLs. With `curl_cffi` installed it impersonates Chrome's TLS fingerprint and can fetch WeChat Official Accounts (`mp.weixin.qq.com`) and other sites that block Python's default fingerprint — no flag needed. Without `curl_cffi`, it falls back to plain `requests` (sufficient for most public sites).
+`web_to_md.py` 支持所有 URL。安装 `curl_cffi` 后可模拟 Chrome TLS 指纹，能抓取微信公众号（`mp.weixin.qq.com`）等屏蔽 Python 默认指纹的站点——无需额外参数。未安装时回退到标准 `requests`（大多数公开网站够用）。
 
-## Diagnostics
+## 环境诊断
 
 ```bash
-python3 scripts/check_env.py    # per-format readiness table: Python deps, pandoc, MinerU token
+python3 scripts/check_env.py    # 按格式显示就绪状态：Python 依赖、pandoc、MinerU token
 ```
 
-## Setup
+## 安装
 
 ```bash
 pip install -r resources/requirements.txt
 python3 scripts/check_env.py
 ```
 
-`check_env.py` prints a per-format readiness table — green entries are usable now; missing-dependency entries point to the package or binary needed.
+`check_env.py` 打印按格式分类的就绪表——绿色表示可用，缺依赖项会指出所需包或二进制。
 
-`pandoc` is optional — only needed for the long-tail document formats (`.doc` / `.odt` / `.rtf` / `.tex` / `.rst` / `.org` / `.typ`).
+`pandoc` 可选——仅处理长尾文档格式（`.doc` / `.odt` / `.rtf` / `.tex` / `.rst` / `.org` / `.typ`）时需要。
 
-## Troubleshooting
+## 故障排查
 
-| Symptom | Fix |
+| 症状 | 解决方法 |
 |---|---|
-| `pandoc not found` while converting `.doc`/`.tex`/etc. | `brew install pandoc` (macOS) or `sudo apt install pandoc` |
-| `MinerU` calls fail with auth error | Set `MINERU_API_TOKEN`, or copy `resources/config.example.json` to the gitignored `resources/config.json` and fill the token |
-| WeChat / Cloudflare URLs return 403 | Install `curl_cffi` so `web_to_md.py` can impersonate a real Chrome TLS fingerprint |
-| Auto-detect picks the wrong type | Force it with `-t pdf\|doc\|excel\|pptx\|web\|sub` |
-| File extension is unusual (e.g. `.pdf.bak`) | Use `-t` to force the type |
+| 转换 `.doc`/`.tex` 等时提示 `pandoc not found` | `brew install pandoc`（macOS）或 `sudo apt install pandoc` |
+| `MinerU` 调用报认证错误 | 设置 `MINERU_API_TOKEN`，或将 `resources/config.example.json` 复制为 gitignore 的 `resources/config.json` 并填入 token |
+| 微信 / Cloudflare URL 返回 403 | 安装 `curl_cffi` 让 `web_to_md.py` 模拟真实 Chrome TLS 指纹 |
+| 自动识别类型错误 | 用 `-t pdf\|doc\|excel\|pptx\|web\|sub` 强制指定 |
+| 文件扩展名异常（如 `.pdf.bak`） | 用 `-t` 强制指定类型 |
 
-## Output convention
+## 输出约定
 
-- Input file → `<input_dir>/<stem>.md` (unless `-o` is given)
-- Embedded images → `<input_dir>/<stem>_files/` with relative references in the Markdown
-- URL → current working directory unless `-o` is given; PDF URLs routed through MinerU use MinerU's output directory behavior
-- Already-Markdown / plain-text inputs are echoed (or copied) without conversion
+- 输入文件 → `<输入目录>/<文件名>.md`（除非指定 `-o`）
+- 嵌入图片 → `<输入目录>/<文件名>_files/`，Markdown 中使用相对路径引用
+- URL → 当前工作目录（除非指定 `-o`）；经 MinerU 处理的 PDF URL 使用 MinerU 的输出目录行为
+- 已是 Markdown / 纯文本的输入直接输出（或复制）不做转换
