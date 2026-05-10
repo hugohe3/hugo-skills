@@ -4,7 +4,6 @@ description: >
   六阶段学习助手，用于系统化学习课程、书籍和文章。
   生成学习计划、预习笔记、通读笔记、Anki 复习卡片和外化产出。
   当用户需要系统学习、制作学习笔记、生成 Anki 卡片或管理学习项目时使用。
-allowed-tools: Read, Write, Bash, Glob, Grep
 ---
 
 # Learning Master

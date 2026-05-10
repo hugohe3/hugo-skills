@@ -1,10 +1,10 @@
 # hugo-skills
 
-个人 Claude Code 技能集合，用于日常工作流。
+个人 AI 技能集合，用于日常工作流。技能以通用 `SKILL.md` 形式组织，可迁移到支持 skill / agent skill 机制的平台使用。
 
 ## 什么是技能？
 
-[Claude Code 技能](https://docs.anthropic.com/en/docs/claude-code/skills) 是可复用的独立工具，可以添加到任意 Claude Code 项目中。每个技能位于 `skills/` 下的独立目录，附带一个 `SKILL.md` 告诉 Claude 如何调用它。
+技能是可复用的独立能力包。每个技能位于 `skills/` 下的独立目录，通过 `SKILL.md` 描述适用场景、执行流程和可用资源；支持 skills 的平台可以读取这些说明，并按需调用脚本、模板和参考资料。
 
 ## 技能列表
 
@@ -13,7 +13,67 @@
 | [learning-master](skills/learning-master/SKILL.md) | 六阶段学习助手，用于系统化学习课程、书籍和文章，生成学习计划、笔记、Anki 卡片和外化产出 |
 | [markdown-conversion](skills/markdown-conversion/SKILL.md) | 将 PDF / Word / Excel / PowerPoint / EPUB / HTML / 字幕 / 网页 URL 转换为干净的 Markdown，供 LLM 读取 |
 
-## 使用方法
+## 安装
+
+### Option A — Download ZIP
+
+不需要 Git。在 GitHub 页面点击 **Code → Download ZIP**，解压到本地目录。
+
+### Option B — Git clone
+
+需要已安装 Git。
+
+```bash
+git clone https://github.com/hugohe3/hugo-skills.git
+cd hugo-skills
+```
+
+之后按需安装对应技能的依赖：
+
+```bash
+# learning-master：Anki TSV 导出
+pip install -r skills/learning-master/resources/requirements.txt
+
+# markdown-conversion：文档转换
+pip install -r skills/markdown-conversion/resources/requirements.txt
+```
+
+如果只使用不依赖脚本的纯文本流程，可以不安装 Python 依赖；一旦需要运行转换器或 Anki 导出脚本，就需要安装对应技能的 `requirements.txt`。
+
+### Option C — Skill marketplace
+
+本仓库提供 `.claude-plugin/marketplace.json`，可通过 Claude Code plugin marketplace 生态安装技能文件。
+
+```bash
+# Cross-agent CLI（Claude Code、Cursor、Codex 等支持 skills 的环境）
+npx skills add hugohe3/hugo-skills
+```
+
+Claude Code 内也可以使用：
+
+```bash
+/plugin marketplace add hugohe3/hugo-skills
+/plugin install hugo-skills@hugo-skills
+```
+
+说明：
+
+- `/plugin marketplace add` 和 `/plugin install` 是 Claude Code 专用命令。
+- `npx skills add ...` 是更通用的 skills 安装入口，适合支持该 CLI 的 agent 环境。
+- marketplace / CLI 安装通常只获取 skill 文件，不等于安装 Python 依赖；如需运行脚本，仍需在安装后的技能目录中执行对应的 `pip install -r .../resources/requirements.txt`。
+
+## 使用
+
+将需要的 `SKILL.md` 添加到支持 skills 的平台或 agent 配置中。推荐按文件路径引用整个技能入口，并保留同级 `scripts/`、`templates/`、`resources/` 等资源目录。
+
+常用入口：
+
+```text
+/path/to/hugo-skills/skills/markdown-conversion/SKILL.md
+/path/to/hugo-skills/skills/learning-master/SKILL.md
+```
+
+### Claude Code 手动配置
 
 在任意 Claude Code 项目的 `.claude/settings.json` 中引用技能：
 
@@ -32,26 +92,26 @@
 }
 ```
 
-或通过 Claude Code CLI 安装：
+也可以通过 Claude Code CLI 添加本地技能：
 
 ```bash
 claude skills add /path/to/hugo-skills/skills/markdown-conversion/SKILL.md
 claude skills add /path/to/hugo-skills/skills/learning-master/SKILL.md
 ```
 
-添加后，Claude 会在你要求转换文档或管理系统化学习项目时自动调用相应技能。
+添加后，支持 skills 的 agent 会在你要求转换文档或管理系统化学习项目时自动调用相应技能。
 
 ## 仓库结构
 
 ```
 skills/
   learning-master/
-    SKILL.md              # 技能清单——Claude 读取此文件
+    SKILL.md              # 技能入口——agent 读取此文件
     scripts/              # Anki 卡片导出脚本
     templates/            # 六阶段学习模板
     resources/            # requirements.txt
   markdown-conversion/
-    SKILL.md              # 技能清单——Claude 读取此文件
+    SKILL.md              # 技能入口——agent 读取此文件
     scripts/              # Python 转换器（每种格式一个）
     resources/            # requirements.txt、config.example.json
 ```

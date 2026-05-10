@@ -1,6 +1,6 @@
 # hugo-skills
 
-个人 Claude Code 技能集合。每个技能是 `skills/` 下的独立目录。
+个人 AI 技能集合。每个技能是 `skills/` 下的独立目录，可迁移到支持 skill / agent skill 机制的平台使用。
 
 ## 目录结构
 
@@ -17,6 +17,7 @@ skills/<skill-name>/
 - 脚本应可作为独立 CLI 运行，不仅限于通过技能调度器调用。
 - Python 依赖写入 `resources/requirements.txt`，锁定主版本号。
 - 不提交密钥——使用环境变量或 gitignore 的配置文件。
+- 保持技能平台无关：`SKILL.md` frontmatter 只使用通用字段，避免写入特定平台专属配置。
 - 代码（变量名、函数名、注释、commit message）使用英文；文档（`SKILL.md`、`README.md`、`CLAUDE.md` 等 `.md` 文件）以简体中文为主。
 
 ## 添加新技能

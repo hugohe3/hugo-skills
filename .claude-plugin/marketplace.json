@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "hugo-skills",
+  "owner": {
+    "name": "Hugo He",
+    "email": "heyug3@gmail.com",
+    "url": "https://github.com/hugohe3"
+  },
+  "metadata": {
+    "description": "Hugo's portable AI skills for document conversion and structured learning workflows",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "hugo-skills",
+      "source": "./",
+      "description": "Portable AI skills for Markdown document conversion and six-stage structured learning workflows. Note: this plugin ships only the skill files; install each skill's Python dependencies from the installed location before running scripts.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Hugo He",
+        "email": "heyug3@gmail.com",
+        "url": "https://github.com/hugohe3"
+      },
+      "homepage": "https://github.com/hugohe3/hugo-skills",
+      "repository": "https://github.com/hugohe3/hugo-skills",
+      "category": "productivity",
+      "keywords": [
+        "ai",
+        "skill",
+        "markdown",
+        "document-conversion",
+        "learning",
+        "anki"
+      ],
+      "strict": false,
+      "skills": [
+        "./skills/learning-master",
+        "./skills/markdown-conversion"
+      ]
+    }
+  ]
+}
