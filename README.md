@@ -61,6 +61,7 @@ Claude Code 内也可以使用：
 - `/plugin marketplace add` 和 `/plugin install` 是 Claude Code 专用命令。
 - `npx skills add ...` 是更通用的 skills 安装入口，适合支持该 CLI 的 agent 环境。
 - marketplace / CLI 安装通常只获取 skill 文件，不等于安装 Python 依赖；如需运行脚本，仍需在安装后的技能目录中执行对应的 `pip install -r .../resources/requirements.txt`。
+- 当前 marketplace 不写固定版本号；Git 托管安装时由 commit SHA 识别版本，适合持续迭代阶段。需要稳定发布时，再引入显式版本号和 Git tag。
 
 ## 使用
 
