@@ -3,3 +3,6 @@ __pycache__/
 
 # Local secrets
 skills/markdown-conversion/resources/config.json
+
+# Local projects (not tracked)
+projects/
