@@ -227,7 +227,12 @@ def dispatch_single(input_arg: str, conv_type: str, output: str | None, use_mine
             else:
                 out_args, out_path, rename_from = mineru_local_paths(input_arg, output)
                 out = str(out_path)
-            image_args = ["--no-images"] if no_images else []
+            if no_images:
+                image_args = ["--no-images"]
+            elif filter_images:
+                image_args = ["--filter-images"]
+            else:
+                image_args = []
             raw_args = ["--raw"] if raw else []
             script_args = (["--url", input_arg] if is_url else [input_arg]) + out_args + image_args + raw_args + unknown_args
             rc = run_python_script("pdf_to_md_mineru.py", script_args)

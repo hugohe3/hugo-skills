@@ -103,6 +103,7 @@ def print_capability_status() -> None:
     openpyxl_ok = package_available("openpyxl")
     pptx_ok = package_available("pptx")
     curl_cffi_ok = package_available("curl_cffi")
+    trafilatura_ok = package_available("trafilatura")
     pandoc_ok = command_available("pandoc")
     token_ok = bool(os.getenv("MINERU_API_TOKEN"))
 
@@ -126,7 +127,14 @@ def print_capability_status() -> None:
     print(f"Document (Pandoc fallback): {'READY' if pandoc_ok else 'MISSING pandoc (only for .doc/.odt/.rtf/.tex/.rst/.org/.typ)'}")
     print(f"Excel: {'READY' if openpyxl_ok else 'MISSING openpyxl'}")
     print(f"PowerPoint: {'READY' if pptx_ok else 'MISSING python-pptx'}")
-    print(f"Web: {'READY' if requests_ok else 'MISSING requests'}{' + curl_cffi (TLS impersonation)' if curl_cffi_ok else ''}")
+    web_status = 'READY' if requests_ok else 'MISSING requests'
+    if curl_cffi_ok:
+        web_status += ' + curl_cffi (TLS impersonation)'
+    if trafilatura_ok:
+        web_status += ' + trafilatura (main-content extraction)'
+    elif requests_ok:
+        web_status += ' + heuristic extraction (MISSING trafilatura)'
+    print(f"Web: {web_status}")
 
 
 def main() -> int:
@@ -164,6 +172,7 @@ def main() -> int:
     check_optional_python_package("openpyxl", "openpyxl")        # excel_to_md
     check_optional_python_package("python-pptx", "pptx")         # ppt_to_md
     check_optional_python_package("curl_cffi", "curl_cffi")      # web_to_md (TLS impersonation)
+    check_optional_python_package("trafilatura", "trafilatura")  # web_to_md main-content extraction
 
     print("-" * 20)
 

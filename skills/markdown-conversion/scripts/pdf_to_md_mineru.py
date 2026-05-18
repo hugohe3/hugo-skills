@@ -10,15 +10,19 @@ import os
 import io
 import json
 import re
+import sys
 import time
 import zipfile
 import requests
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+from _image_filter import should_keep_image_bytes  # noqa: E402
+
 
 # Matches Markdown image references like ![alt](src) or ![alt](src "title"),
 # including multi-line alt text. Used to strip image refs when --no-images.
-_IMAGE_REF_RE = re.compile(r'!\[[^\]]*\]\([^)]*\)')
+_IMAGE_REF_RE = re.compile(r'!\[[^\]]*\]\((?P<src>[^)]*)\)')
 
 
 def strip_image_refs(markdown: str) -> str:
@@ -38,6 +42,31 @@ def strip_image_refs(markdown: str) -> str:
     text = "\n".join(cleaned_lines)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text
+
+
+def image_ref_filename(src: str) -> str:
+    """Return the basename from a Markdown image target."""
+    src = src.strip()
+    if src.startswith("<"):
+        target = src[1:].split(">", 1)[0]
+    else:
+        target = src.split()[0].strip('"\'')
+    return Path(target).name
+
+
+def strip_image_refs_by_filenames(markdown: str, filenames: set[str]) -> str:
+    """Remove Markdown image refs whose target basename is in filenames."""
+    cleaned_lines: list[str] = []
+    for line in markdown.splitlines():
+        stripped = _IMAGE_REF_RE.sub(
+            lambda match: "" if image_ref_filename(match.group("src")) in filenames else match.group(0),
+            line,
+        )
+        if line.strip() and not stripped.strip():
+            continue
+        cleaned_lines.append(stripped)
+    text = "\n".join(cleaned_lines)
+    return re.sub(r'\n{3,}', '\n\n', text)
 
 
 def load_config() -> dict[str, object]:
@@ -394,6 +423,7 @@ class MinerUClient:
         output_filename: str | None = None,
         extract_md: bool = True,
         no_images: bool = False,
+        filter_images: bool = False,
     ) -> str:
         """
         Download and extract result archive.
@@ -404,6 +434,7 @@ class MinerUClient:
             output_filename: Output filename (without extension); defaults to the original name.
             extract_md: Whether to extract only Markdown files.
             no_images: When True, drop the images folder and strip image references from the Markdown.
+            filter_images: When True, drop decorative / duplicate images from the synced images folder.
 
         Returns:
             Markdown file path or output directory.
@@ -425,7 +456,28 @@ class MinerUClient:
             zf.extractall(extract_dir)
             print(f"[OK] Raw resources extracted to: {extract_dir}")
 
-            # 2. Find MD files and copy to root directory (0-resources)
+            # 2. Classify images before writing Markdown, so removed images can
+            # also have their Markdown references stripped.
+            source_images_dir = extract_dir / "images"
+            kept_images: list[Path] = []
+            dropped_image_names: set[str] = set()
+            if not no_images and source_images_dir.exists() and source_images_dir.is_dir():
+                seen_hashes: set[str] = set()
+                for img_file in sorted(source_images_dir.glob("*")):
+                    if not img_file.is_file():
+                        continue
+                    if filter_images:
+                        try:
+                            payload = img_file.read_bytes()
+                        except OSError:
+                            kept_images.append(img_file)
+                            continue
+                        if not should_keep_image_bytes(payload, seen_hashes=seen_hashes):
+                            dropped_image_names.add(img_file.name)
+                            continue
+                    kept_images.append(img_file)
+
+            # 3. Find MD files and copy to root directory (0-resources)
             md_files = [f for f in zf.namelist() if f.endswith('.md')]
             final_md_path = None
             if md_files:
@@ -441,24 +493,34 @@ class MinerUClient:
                     md_text = source_md.read_text(encoding="utf-8", errors="replace")
                     md_text = strip_image_refs(md_text)
                     dest_md_path.write_text(md_text, encoding="utf-8")
+                elif dropped_image_names:
+                    md_text = source_md.read_text(encoding="utf-8", errors="replace")
+                    md_text = strip_image_refs_by_filenames(md_text, dropped_image_names)
+                    dest_md_path.write_text(md_text, encoding="utf-8")
                 else:
                     dest_md_path.write_bytes(source_md.read_bytes())
                 print(f"[OK] Markdown saved to: {dest_md_path}")
                 final_md_path = str(dest_md_path)
 
-            # 3. Find images folder and sync to root images/
-            source_images_dir = extract_dir / "images"
+            # 4. Sync images to root images/
             if no_images:
                 print("[OK] Images skipped (--no-images)")
-            elif source_images_dir.exists() and source_images_dir.is_dir():
+            elif kept_images:
                 dest_images_dir = output_path / "images"
                 dest_images_dir.mkdir(parents=True, exist_ok=True)
 
                 import shutil
-                for img_file in source_images_dir.glob("*"):
-                    if img_file.is_file():
-                        shutil.copy2(img_file, dest_images_dir / img_file.name)
-                print(f"[OK] Images synced to: {dest_images_dir}")
+                for img_file in kept_images:
+                    shutil.copy2(img_file, dest_images_dir / img_file.name)
+                if filter_images:
+                    print(
+                        f"[OK] Images synced to: {dest_images_dir} "
+                        f"({len(kept_images)} kept, {len(dropped_image_names)} filtered)"
+                    )
+                else:
+                    print(f"[OK] Images synced to: {dest_images_dir}")
+            elif filter_images and dropped_image_names:
+                print(f"[OK] Images filtered: {len(dropped_image_names)} removed")
 
             # If no MD file found, return the extraction directory
             return final_md_path or str(extract_dir)
@@ -472,6 +534,7 @@ def convert_local_file(
     token: str | None = None,
     model_version: str = "vlm",
     no_images: bool = False,
+    filter_images: bool = False,
     **kwargs
 ) -> str:
     """
@@ -515,6 +578,7 @@ def convert_local_file(
             output_dir,
             output_filename=output_filename,
             no_images=no_images,
+            filter_images=filter_images,
         )
         print("-" * 40)
         print(f"[DONE] Conversion complete: {md_path}")
@@ -530,6 +594,7 @@ def convert_url(
     token: str | None = None,
     model_version: str = "vlm",
     no_images: bool = False,
+    filter_images: bool = False,
     **kwargs
 ) -> str:
     """
@@ -560,7 +625,12 @@ def convert_url(
     # Download result
     if result.get("state") == "done":
         zip_url = result["full_zip_url"]
-        md_path = client.download_and_extract(zip_url, output_dir, no_images=no_images)
+        md_path = client.download_and_extract(
+            zip_url,
+            output_dir,
+            no_images=no_images,
+            filter_images=filter_images,
+        )
         print("-" * 40)
         print(f"[DONE] Conversion complete: {md_path}")
         return md_path
@@ -574,6 +644,7 @@ def convert_batch(
     token: str | None = None,
     model_version: str = "vlm",
     no_images: bool = False,
+    filter_images: bool = False,
     **kwargs
 ) -> list[str]:
     """
@@ -620,6 +691,7 @@ def convert_batch(
                 target_dir,
                 output_filename=output_filename,
                 no_images=no_images,
+                filter_images=filter_images,
             )
             md_paths.append(md_path)
         else:
@@ -682,7 +754,7 @@ Environment variables:
     parser.add_argument(
         '--filter-images',
         action='store_true',
-        help='Accepted for parity with convert.py (MinerU already filters internally; this is a no-op)',
+        help='Filter decorative images after MinerU extraction',
     )
     parser.add_argument(
         '--raw',
@@ -691,6 +763,10 @@ Environment variables:
     )
     
     args = parser.parse_args()
+
+    if args.no_images and args.filter_images:
+        print("Error: --no-images and --filter-images are mutually exclusive.")
+        return 2
     
     # Build common parameters
     kwargs = {
@@ -728,6 +804,7 @@ Environment variables:
                 token=args.token,
                 model_version=args.model,
                 no_images=args.no_images,
+                filter_images=args.filter_images,
                 **kwargs
             )
         elif args.files:
@@ -739,6 +816,7 @@ Environment variables:
                     token=args.token,
                     model_version=args.model,
                     no_images=args.no_images,
+                    filter_images=args.filter_images,
                     **kwargs
                 )
             else:
@@ -749,6 +827,7 @@ Environment variables:
                     token=args.token,
                     model_version=args.model,
                     no_images=args.no_images,
+                    filter_images=args.filter_images,
                     **kwargs
                 )
         else:

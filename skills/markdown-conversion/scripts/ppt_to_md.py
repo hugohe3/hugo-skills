@@ -24,6 +24,7 @@ from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _image_filter import should_keep_image as _should_keep_image  # noqa: E402
+from _image_filter import should_keep_image_bytes as _should_keep_image_bytes  # noqa: E402
 
 
 SUPPORTED_FORMATS = {
@@ -161,7 +162,7 @@ def _shape_passes_ai_filter(
         with Image.open(io.BytesIO(blob)) as img:
             pixel_w, pixel_h = img.size
     except Exception:
-        pixel_w = pixel_h = 0  # Filter will fall back to byte-size + dedup
+        return _should_keep_image_bytes(blob, seen_hashes=seen_hashes)
     render_w = int(getattr(shape, "width", 0) or 0)
     render_h = int(getattr(shape, "height", 0) or 0)
     return _should_keep_image(
