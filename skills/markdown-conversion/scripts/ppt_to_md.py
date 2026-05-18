@@ -22,6 +22,9 @@ from pathlib import Path
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
+sys.path.insert(0, str(Path(__file__).parent))
+from _image_filter import should_keep_image as _should_keep_image  # noqa: E402
+
 
 SUPPORTED_FORMATS = {
     ".pptx": "PowerPoint Presentation",
@@ -141,6 +144,36 @@ def save_picture(shape: object, asset_dir: Path, slide_index: int, image_index: 
     return filename
 
 
+def _shape_passes_ai_filter(
+    shape: object,
+    slide_size: tuple[int, int],
+    seen_hashes: set[str],
+) -> bool:
+    """Run the shared decorative-image filter against a PPT picture shape."""
+    try:
+        image = shape.image
+    except Exception:
+        return True  # No accessible image (e.g. linked picture) — keep ref
+    blob = image.blob
+    try:
+        from PIL import Image
+        import io
+        with Image.open(io.BytesIO(blob)) as img:
+            pixel_w, pixel_h = img.size
+    except Exception:
+        pixel_w = pixel_h = 0  # Filter will fall back to byte-size + dedup
+    render_w = int(getattr(shape, "width", 0) or 0)
+    render_h = int(getattr(shape, "height", 0) or 0)
+    return _should_keep_image(
+        blob,
+        pixel_w or 1,
+        pixel_h or 1,
+        page_size=slide_size if all(slide_size) else None,
+        render_size=(render_w, render_h) if (render_w and render_h) else None,
+        seen_hashes=seen_hashes,
+    )
+
+
 def extract_notes(slide: object) -> str:
     """Extract speaker notes text from a slide, if available."""
     try:
@@ -163,6 +196,8 @@ def extract_notes(slide: object) -> str:
 def convert_presentation_to_markdown(
     input_path: str,
     output_path: str | None = None,
+    no_images: bool = False,
+    filter_images: bool = False,
 ) -> str:
     """Convert a supported PowerPoint file to Markdown."""
     input_file = Path(input_path)
@@ -199,6 +234,11 @@ def convert_presentation_to_markdown(
 
     image_count = 0
     asset_dir_used = False
+    slide_size = (
+        int(getattr(presentation, "slide_width", 0) or 0),
+        int(getattr(presentation, "slide_height", 0) or 0),
+    )
+    seen_image_hashes: set[str] = set()
 
     for slide_index, slide in enumerate(presentation.slides, 1):
         lines.append(f"## Slide {slide_index}")
@@ -215,6 +255,10 @@ def convert_presentation_to_markdown(
                 continue
 
             if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                if no_images:
+                    continue
+                if filter_images and not _shape_passes_ai_filter(shape, slide_size, seen_image_hashes):
+                    continue
                 next_image_index = image_count + 1
                 asset_dir.mkdir(parents=True, exist_ok=True)
                 filename = save_picture(shape, asset_dir, slide_index, next_image_index)
@@ -261,7 +305,7 @@ def convert_presentation_to_markdown(
     return markdown_content
 
 
-def process_directory(input_dir: str, output_dir: str | None = None) -> None:
+def process_directory(input_dir: str, output_dir: str | None = None, no_images: bool = False, filter_images: bool = False) -> None:
     """Convert all supported PowerPoint files in a directory to Markdown."""
     input_path = Path(input_dir)
 
@@ -280,7 +324,7 @@ def process_directory(input_dir: str, output_dir: str | None = None) -> None:
     for presentation_file in presentation_files:
         output_file = output_path / f"{presentation_file.stem}.md"
         print(f"Processing: {presentation_file.name}")
-        result = convert_presentation_to_markdown(str(presentation_file), str(output_file))
+        result = convert_presentation_to_markdown(str(presentation_file), str(output_file), no_images=no_images, filter_images=filter_images)
         if not result:
             print(f"[WARN] Skipped failed file: {presentation_file.name}")
 
@@ -306,16 +350,36 @@ Legacy .ppt is not parsed directly. Resave it as .pptx or export it to PDF first
     )
     parser.add_argument("input", help="Input PowerPoint file or directory")
     parser.add_argument("-o", "--output", help="Output Markdown file or directory path")
+    parser.add_argument(
+        "--no-images",
+        action="store_true",
+        help="Skip picture shapes; no asset directory or image references",
+    )
+    parser.add_argument(
+        "--filter-images",
+        action="store_true",
+        help="Filter decorative images (master backgrounds, logos, low-info blocks)",
+    )
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Faithful reproduction (no-op for pptx; reserved for parity)",
+    )
 
     args = parser.parse_args()
+
+    if args.no_images and args.filter_images:
+        print("Error: --no-images and --filter-images are mutually exclusive.")
+        sys.exit(2)
+
     input_path = Path(args.input)
 
     if input_path.is_file():
         output = args.output or str(input_path.with_suffix(".md"))
-        result = convert_presentation_to_markdown(str(input_path), output)
+        result = convert_presentation_to_markdown(str(input_path), output, no_images=args.no_images, filter_images=args.filter_images)
         sys.exit(0 if result else 1)
     if input_path.is_dir():
-        process_directory(str(input_path), args.output)
+        process_directory(str(input_path), args.output, no_images=args.no_images, filter_images=args.filter_images)
         sys.exit(0)
 
     print(f"Error: File or directory not found: {args.input}")

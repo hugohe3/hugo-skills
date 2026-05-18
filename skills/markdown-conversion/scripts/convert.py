@@ -177,11 +177,26 @@ Examples:
         action="store_true",
         help="Use MinerU cloud parser instead of local parser (PDF only)",
     )
+    parser.add_argument(
+        "--no-images",
+        action="store_true",
+        help="Skip image extraction across all backends (drops image references from output)",
+    )
+    parser.add_argument(
+        "--filter-images",
+        action="store_true",
+        help="Filter decorative images (logos, tracking pixels, low-info blocks) — keeps information-bearing images",
+    )
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Faithful reproduction: disable all heuristic cleaning (header/footer dedup, heading detection, web main-content extraction, subtitle paragraph anchors)",
+    )
     parser.add_argument("-o", "--output", help="Output path")
     return parser.parse_known_args()
 
 
-def dispatch_single(input_arg: str, conv_type: str, output: str | None, use_mineru: bool, unknown_args: list[str]) -> int:
+def dispatch_single(input_arg: str, conv_type: str, output: str | None, use_mineru: bool, no_images: bool, filter_images: bool, raw: bool, unknown_args: list[str]) -> int:
     """Dispatch one input (single file or URL) to the right converter. Returns exit code."""
     if conv_type == "sub":
         conv_type = "subtitle"
@@ -212,12 +227,26 @@ def dispatch_single(input_arg: str, conv_type: str, output: str | None, use_mine
             else:
                 out_args, out_path, rename_from = mineru_local_paths(input_arg, output)
                 out = str(out_path)
-            script_args = (["--url", input_arg] if is_url else [input_arg]) + out_args + unknown_args
+            image_args = ["--no-images"] if no_images else []
+            raw_args = ["--raw"] if raw else []
+            script_args = (["--url", input_arg] if is_url else [input_arg]) + out_args + image_args + raw_args + unknown_args
             rc = run_python_script("pdf_to_md_mineru.py", script_args)
         else:
             out = resolve_output(output, input_arg)
             rename_from = None
-            script_args = [input_arg] + build_output_args(out) + unknown_args
+            # Map --no-images / --filter-images onto pdf_to_md.py's --images
+            # tri-state; defer to any explicit --images in unknown_args.
+            has_explicit_images = any(a == "--images" or a.startswith("--images=") for a in unknown_args)
+            if has_explicit_images:
+                image_args = []
+            elif no_images:
+                image_args = ["--images", "none"]
+            elif filter_images:
+                image_args = ["--images", "filtered"]
+            else:
+                image_args = []
+            raw_args = ["--raw"] if raw else []
+            script_args = [input_arg] + build_output_args(out) + image_args + raw_args + unknown_args
             rc = run_python_script("pdf_to_md.py", script_args)
         if rc != 0:
             return rc
@@ -228,9 +257,16 @@ def dispatch_single(input_arg: str, conv_type: str, output: str | None, use_mine
             print_output(out)
         return 0
 
+    image_args: list[str] = []
+    if no_images:
+        image_args = ["--no-images"]
+    elif filter_images:
+        image_args = ["--filter-images"]
+    raw_args = ["--raw"] if raw else []
+
     if conv_type == "web":
         out = output
-        script_args = [input_arg] + build_output_args(out)
+        script_args = [input_arg] + build_output_args(out) + image_args + raw_args + unknown_args
         rc = run_python_script("web_to_md.py", script_args)
         if rc != 0:
             return rc
@@ -240,7 +276,7 @@ def dispatch_single(input_arg: str, conv_type: str, output: str | None, use_mine
 
     if conv_type == "doc":
         out = resolve_output(output, input_arg)
-        script_args = [input_arg] + build_output_args(out) + unknown_args
+        script_args = [input_arg] + build_output_args(out) + image_args + raw_args + unknown_args
         rc = run_python_script("doc_to_md.py", script_args)
         if rc != 0:
             return rc
@@ -258,7 +294,7 @@ def dispatch_single(input_arg: str, conv_type: str, output: str | None, use_mine
 
     if conv_type == "pptx":
         out = resolve_output(output, input_arg)
-        script_args = [input_arg] + build_output_args(out) + unknown_args
+        script_args = [input_arg] + build_output_args(out) + image_args + raw_args + unknown_args
         rc = run_python_script("ppt_to_md.py", script_args)
         if rc != 0:
             return rc
@@ -267,7 +303,7 @@ def dispatch_single(input_arg: str, conv_type: str, output: str | None, use_mine
 
     if conv_type == "subtitle":
         out = resolve_output(output, input_arg) if Path(input_arg).is_file() else output
-        script_args = [input_arg] + build_output_args(out) + unknown_args
+        script_args = [input_arg] + build_output_args(out) + raw_args + unknown_args
         rc = run_python_script("subtitle_to_md.py", script_args)
         if rc != 0:
             return rc
@@ -280,7 +316,7 @@ def dispatch_single(input_arg: str, conv_type: str, output: str | None, use_mine
     return 1
 
 
-def batch_directory(input_dir: str, output_dir: str | None, use_mineru: bool, unknown_args: list[str]) -> tuple[int, Path]:
+def batch_directory(input_dir: str, output_dir: str | None, use_mineru: bool, no_images: bool, filter_images: bool, raw: bool, unknown_args: list[str]) -> tuple[int, Path]:
     """Convert every convertible file in a directory. Returns (failures, output_root)."""
     in_path = Path(input_dir)
     files = list_convertible_files(in_path)
@@ -304,7 +340,7 @@ def batch_directory(input_dir: str, output_dir: str | None, use_mineru: bool, un
             continue
         per_out = str(reserve_batch_output(f, out_root, used_outputs))
         print(f"  [{i}/{len(files)}] {f.name}")
-        rc = dispatch_single(str(f), per_type, per_out, use_mineru, unknown_args)
+        rc = dispatch_single(str(f), per_type, per_out, use_mineru, no_images, filter_images, raw, unknown_args)
         if rc == 0:
             succeeded += 1
         else:
@@ -323,11 +359,16 @@ def main() -> int:
     if conv_type == "auto":
         conv_type = detect_type(args.input)
 
+    # Mutually exclusive image flags
+    if args.no_images and args.filter_images:
+        print("Error: --no-images and --filter-images are mutually exclusive.")
+        return 2
+
     if conv_type == "dir":
-        failures, _ = batch_directory(args.input, args.output, args.mineru, unknown_args)
+        failures, _ = batch_directory(args.input, args.output, args.mineru, args.no_images, args.filter_images, args.raw, unknown_args)
         return 0 if failures == 0 else 1
 
-    return dispatch_single(args.input, conv_type, args.output, args.mineru, unknown_args)
+    return dispatch_single(args.input, conv_type, args.output, args.mineru, args.no_images, args.filter_images, args.raw, unknown_args)
 
 
 if __name__ == "__main__":

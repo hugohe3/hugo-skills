@@ -26,6 +26,11 @@ python-pptx>=0.6,<2      # .pptx / .pptm / .ppsx / .potx
 curl_cffi>=0.6,<1        # TLS impersonation (WeChat, Cloudflare-protected sites)
 pillow>=10,<12           # image post-processing for web_to_md.py
 
+# --- Recommended for web extraction ---
+trafilatura>=1.10,<2     # production-grade main-content extraction in web_to_md.py
+                         # (used by default; --raw disables it; falls back to
+                         # built-in heuristic when this package is missing)
+
 # --- System binary (not pip-installable, optional) ---
 # pandoc — required only for .doc / .odt / .rtf / .tex / .rst / .org / .typ
 #   macOS:   brew install pandoc

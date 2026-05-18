@@ -64,14 +64,44 @@ def html_to_text(content: str) -> str:
         return re.sub(r'\s+', ' ', text).strip()
 
 
-def process_srt_content(content: str) -> str:
+BLOCK_SIZE = 50  # Insert a <!-- Block N --> anchor every N subtitle entries
+
+
+def _format_chunks(chunks: list[tuple[str, str]], raw: bool) -> str:
+    """Render a list of (start_timestamp, text) chunks.
+
+    Default: paragraphs separated by blank lines, with `<!-- Block N --><!-- ts -->`
+    anchors every BLOCK_SIZE entries so readers (human or LLM) can navigate.
+    `raw=True`: flatten everything into a single line (legacy behavior, faithful
+    to the SRT timing-as-pauses convention).
+    """
+    if raw:
+        return ' '.join(text for _, text in chunks)
+
+    lines: list[str] = []
+    for idx, (timestamp, text) in enumerate(chunks):
+        if idx % BLOCK_SIZE == 0:
+            block_num = idx // BLOCK_SIZE + 1
+            anchor = f"<!-- Block {block_num} -->"
+            if timestamp:
+                anchor += f" <!-- {timestamp} -->"
+            if lines:
+                lines.append('')  # blank line separator
+            lines.append(anchor)
+            lines.append('')
+        lines.append(text)
+    return '\n'.join(lines)
+
+
+def process_srt_content(content: str, raw: bool = False) -> str:
     """Parse SRT subtitle content and return clean transcript text."""
     lines = content.split('\n')
-    processed_text = []
+    chunks: list[tuple[str, str]] = []
     i = 0
 
     while i < len(lines):
         if i < len(lines) and '-->' in lines[i]:
+            timestamp = lines[i].split('-->')[0].strip()
             i += 1
             while i < len(lines) and not lines[i].strip():
                 i += 1
@@ -81,14 +111,14 @@ def process_srt_content(content: str) -> str:
                     text_chunk.append(lines[i].strip())
                 i += 1
             if text_chunk:
-                processed_text.append(' '.join(text_chunk))
+                chunks.append((timestamp, ' '.join(text_chunk)))
         else:
             i += 1
 
-    return ' '.join(processed_text)
+    return _format_chunks(chunks, raw)
 
 
-def process_vtt_content(content: str) -> str:
+def process_vtt_content(content: str, raw: bool = False) -> str:
     """Parse VTT subtitle content and return clean transcript text."""
     lines = content.split('\n')
     start_index = 0
@@ -100,27 +130,28 @@ def process_vtt_content(content: str) -> str:
                 start_index += 1
             break
 
-    processed_text = []
+    chunks: list[tuple[str, str]] = []
     i = start_index
 
     while i < len(lines):
         if i < len(lines) and '-->' in lines[i]:
+            timestamp = lines[i].split('-->')[0].strip()
             i += 1
             text_chunk = []
             while i < len(lines) and lines[i].strip() and '-->' not in lines[i]:
                 text_chunk.append(lines[i].strip())
                 i += 1
             if text_chunk:
-                processed_text.append(' '.join(text_chunk))
+                chunks.append((timestamp, ' '.join(text_chunk)))
         else:
             i += 1
 
-    return ' '.join(processed_text)
+    return _format_chunks(chunks, raw)
 
 
-def process_ass_content(content: str) -> str:
+def process_ass_content(content: str, raw: bool = False) -> str:
     """Parse ASS subtitle content and return clean transcript text."""
-    processed_text = []
+    chunks: list[tuple[str, str]] = []
     in_events = False
 
     for line in content.splitlines():
@@ -136,21 +167,22 @@ def process_ass_content(content: str) -> str:
         fields = stripped.split(',', 9)
         if len(fields) < 10:
             continue
+        timestamp = fields[1].strip() if len(fields) > 1 else ""
         text = fields[-1]
         text = re.sub(r'\{[^}]*\}', '', text)
         text = text.replace(r'\N', ' ').replace(r'\n', ' ')
         text = re.sub(r'\s+', ' ', text).strip()
         if text:
-            processed_text.append(text)
+            chunks.append((timestamp, text))
 
-    return ' '.join(processed_text)
+    return _format_chunks(chunks, raw)
 
 
-def process_file(file_path: Path) -> str:
+def process_file(file_path: Path, raw: bool = False) -> str:
     """Process a single subtitle file, auto-detecting its format."""
     encodings = ['utf-8', 'gbk', 'latin-1']
     content = None
-    
+
     for encoding in encodings:
         try:
             with open(file_path, 'r', encoding=encoding) as file:
@@ -158,20 +190,20 @@ def process_file(file_path: Path) -> str:
             break
         except UnicodeDecodeError:
             continue
-    
+
     if content is None:
         print(f"  [WARN] Could not read file: {file_path}")
         return ""
 
     suffix = file_path.suffix.lower()
-    
+
     if suffix in HTML_SUFFIXES:
         return html_to_text(content)
     if suffix == '.ass':
-        return process_ass_content(content)
+        return process_ass_content(content, raw=raw)
     if suffix == '.vtt' or content.strip().startswith('WEBVTT'):
-        return process_vtt_content(content)
-    return process_srt_content(content)
+        return process_vtt_content(content, raw=raw)
+    return process_srt_content(content, raw=raw)
 
 
 def natural_sort_key(s: str) -> list:
@@ -207,7 +239,7 @@ def reserve_output_path(input_file: Path, out_dir: Path, used_names: set[str]) -
     return out_path
 
 
-def convert_subtitle_file(input_file: str, output_file: str | None = None) -> int:
+def convert_subtitle_file(input_file: str, output_file: str | None = None, raw: bool = False) -> int:
     """Convert a single subtitle file to Markdown."""
     in_path = Path(input_file)
     if not in_path.exists() or not in_path.is_file():
@@ -218,7 +250,7 @@ def convert_subtitle_file(input_file: str, output_file: str | None = None) -> in
         print(f"[ERROR] Unsupported subtitle format: {in_path.suffix}")
         return 1
 
-    content = process_file(in_path)
+    content = process_file(in_path, raw=raw)
     if not content:
         print("[ERROR] No content extracted")
         return 1
@@ -229,7 +261,7 @@ def convert_subtitle_file(input_file: str, output_file: str | None = None) -> in
     return 0
 
 
-def convert_flat_directory(root_path: Path, out_path: Path, include_html: bool) -> int:
+def convert_flat_directory(root_path: Path, out_path: Path, include_html: bool, raw: bool = False) -> int:
     """Convert subtitle files directly under a directory."""
     files = collect_input_files(root_path, include_html)
     if not files:
@@ -239,7 +271,7 @@ def convert_flat_directory(root_path: Path, out_path: Path, include_html: bool) 
     generated = 0
     used_outputs: set[str] = set()
     for file_path in files:
-        content = process_file(file_path)
+        content = process_file(file_path, raw=raw)
         if not content:
             print(f"  [WARN] No content extracted: {file_path.name}")
             continue
@@ -249,7 +281,7 @@ def convert_flat_directory(root_path: Path, out_path: Path, include_html: bool) 
     return 0 if generated else 1
 
 
-def convert_subtitles(input_dir: str, output_dir: str | None = None, include_html: bool = False) -> int:
+def convert_subtitles(input_dir: str, output_dir: str | None = None, include_html: bool = False, raw: bool = False) -> int:
     """Convert subtitle files in a course directory to Markdown."""
     root_path = Path(input_dir)
     
@@ -257,17 +289,17 @@ def convert_subtitles(input_dir: str, output_dir: str | None = None, include_htm
         print(f"[ERROR] Directory not found: {input_dir}")
         return 1
     if not root_path.is_dir():
-        return convert_subtitle_file(input_dir, output_dir)
+        return convert_subtitle_file(input_dir, output_dir, raw=raw)
 
     if output_dir:
         out_path = Path(output_dir)
     else:
         out_path = root_path / "0-srt"
-    
+
     out_path.mkdir(parents=True, exist_ok=True)
 
     if collect_input_files(root_path, include_html):
-        rc = convert_flat_directory(root_path, out_path, include_html)
+        rc = convert_flat_directory(root_path, out_path, include_html, raw=raw)
         if rc == 0:
             print(f"[OK] Done. Output: {out_path}")
         return rc
@@ -300,7 +332,7 @@ def convert_subtitles(input_dir: str, output_dir: str | None = None, include_htm
             file_type = file_path.suffix.lower()
             print(f"  [INFO] Processing: {file_name} ({file_type})")
 
-            processed_content = process_file(file_path)
+            processed_content = process_file(file_path, raw=raw)
 
             if not processed_content:
                 print(f"    [WARN] No content extracted")
@@ -334,12 +366,15 @@ Examples:
     
     parser.add_argument('input', help='subtitle file or course directory path')
     parser.add_argument('-o', '--output', help='output Markdown file for file input, or output directory for directory input')
-    parser.add_argument('--include-html', action='store_true', 
+    parser.add_argument('--include-html', action='store_true',
                         help='also include HTML files')
-    
+    parser.add_argument('--raw', action='store_true',
+                        help='Flatten subtitle text into a single line (legacy behavior). '
+                             'Default is paragraphs with <!-- Block N --> anchors.')
+
     args = parser.parse_args()
-    
-    return convert_subtitles(args.input, args.output, args.include_html)
+
+    return convert_subtitles(args.input, args.output, args.include_html, raw=args.raw)
 
 
 if __name__ == "__main__":

@@ -40,6 +40,20 @@ except ImportError:
     print("Please run: pip install requests beautifulsoup4")
     sys.exit(1)
 
+from pathlib import Path as _Path
+sys.path.insert(0, str(_Path(__file__).parent))
+from _image_filter import should_keep_image_bytes as _should_keep_image_bytes  # noqa: E402
+
+# Default: trafilatura provides production-grade main-content extraction.
+# Used by default; --raw disables it and falls back to the heuristic
+# CMS-selector scoring (which preserves more boilerplate / nav / footer).
+try:
+    import trafilatura  # type: ignore
+    _TRAFILATURA_AVAILABLE = True
+except ImportError:
+    trafilatura = None
+    _TRAFILATURA_AVAILABLE = False
+
 # Prefer curl_cffi for TLS-fingerprint impersonation (bypasses JA3 blocking on
 # sites like WeChat). Fall back to plain requests when it's not installed.
 try:
@@ -206,6 +220,7 @@ def download_and_rewrite_images(
     page_url: str,
     image_dir: str,
     rel_prefix: str,
+    filter_images: bool = False,
 ) -> int:
     """Download images under the main content node and rewrite `src` paths."""
     if content_element is None:
@@ -217,6 +232,9 @@ def download_and_rewrite_images(
     os.makedirs(image_dir, exist_ok=True)
     downloaded = {}
     saved = 0
+    seen_hashes: set[str] = set()
+    # Mutate the soup in place: decompose any <img> the ai filter rejects.
+    to_decompose: list[Tag] = []
 
     for idx, img in enumerate(images):
         # Prefer lazy-load attributes — WeChat, Zhihu, and many CMSes keep the
@@ -251,6 +269,9 @@ def download_and_rewrite_images(
                     verify=False,
                 )
                 resp.raise_for_status()
+                if filter_images and not _should_keep_image_bytes(resp.content, seen_hashes=seen_hashes):
+                    to_decompose.append(img)
+                    continue
                 filename = build_image_filename(
                     abs_url, idx, resp.headers.get("Content-Type"))
 
@@ -318,6 +339,9 @@ def download_and_rewrite_images(
         rel_path = os.path.join(
             rel_prefix, saved_name) if rel_prefix else saved_name
         img["src"] = rel_path
+
+    for stale in to_decompose:
+        stale.decompose()
 
     return saved
 
@@ -668,7 +692,7 @@ def simple_html_to_markdown_traversal(soup: Tag | BeautifulSoup | None) -> str:
     return md or ""
 
 
-def process_url(url: str, output_file: str | None = None) -> tuple[bool, str, str | None]:
+def process_url(url: str, output_file: str | None = None, no_images: bool = False, filter_images: bool = False, raw: bool = False) -> tuple[bool, str, str | None]:
     """Fetch, convert, and save one web page as Markdown."""
     print(f"\n[Fetching] {url}")
     try:
@@ -695,14 +719,40 @@ def process_url(url: str, output_file: str | None = None) -> tuple[bool, str, st
         image_dir = os.path.join(output_dirname, f"{base_name}_files")
         rel_image_prefix = os.path.relpath(image_dir, output_dirname)
 
-        # Extract Content
-        content_div = find_main_content(soup)
+        # Extract Content: default uses trafilatura main-content extraction;
+        # --raw falls back to the heuristic CMS-selector scoring which keeps
+        # more boilerplate (closer to the original page structure).
+        content_div = None
+        if not raw and _TRAFILATURA_AVAILABLE:
+            try:
+                extracted_html = trafilatura.extract(
+                    html,
+                    output_format='html',
+                    favor_recall=False,
+                    include_comments=False,
+                    include_tables=True,
+                    include_images=True,
+                )
+                if extracted_html:
+                    content_div = BeautifulSoup(extracted_html, 'html.parser')
+                    print("   [OK] Content extracted by trafilatura")
+            except Exception as e:
+                print(f"   [WARN] trafilatura failed, falling back to heuristic: {e}")
+        if content_div is None:
+            content_div = find_main_content(soup)
+            if not raw and not _TRAFILATURA_AVAILABLE:
+                print("   [HINT] Install 'trafilatura' for cleaner main-content extraction: pip install trafilatura")
 
-        # Download images and rewrite src before markdown conversion
-        image_count = download_and_rewrite_images(
-            content_div, url, image_dir, rel_image_prefix)
-        if image_count:
-            print(f"   [OK] Images: {image_count} saved to {image_dir}")
+        if no_images:
+            if content_div is not None:
+                for img in content_div.find_all("img"):
+                    img.decompose()
+        else:
+            # Download images and rewrite src before markdown conversion
+            image_count = download_and_rewrite_images(
+                content_div, url, image_dir, rel_image_prefix, filter_images=filter_images)
+            if image_count:
+                print(f"   [OK] Images: {image_count} saved to {image_dir}")
 
         # Convert to MD
         # Note: We pass the element to our traversal function
@@ -751,8 +801,27 @@ def main() -> None:
         "-f", "--file", help="File containing URLs (one per line)")
     parser.add_argument("-o", "--output", help="Output file (single URL only)")
     parser.add_argument("-d", "--dir", help="Output directory")
+    parser.add_argument(
+        "--no-images",
+        action="store_true",
+        help="Skip image downloads; strip <img> from the parsed content",
+    )
+    parser.add_argument(
+        "--filter-images",
+        action="store_true",
+        help="Filter decorative images (1x1 trackers, logos, low-info blocks)",
+    )
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Faithful reproduction: disable trafilatura main-content extraction (keeps more boilerplate)",
+    )
 
     args = parser.parse_args()
+
+    if args.no_images and args.filter_images:
+        print("Error: --no-images and --filter-images are mutually exclusive.")
+        sys.exit(2)
 
     if args.dir:
         CONFIG["output_dir"] = args.dir
@@ -778,7 +847,7 @@ def main() -> None:
     for i, url in enumerate(targets):
         # Allow specific output file only if 1 URL
         out = args.output if (len(targets) == 1 and args.output) else None
-        success, url, err = process_url(url, out)
+        success, url, err = process_url(url, out, no_images=args.no_images, filter_images=args.filter_images, raw=args.raw)
         results.append((success, url, err))
 
     # Summary

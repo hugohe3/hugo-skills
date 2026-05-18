@@ -9,10 +9,35 @@ import argparse
 import os
 import io
 import json
+import re
 import time
 import zipfile
 import requests
 from pathlib import Path
+
+
+# Matches Markdown image references like ![alt](src) or ![alt](src "title"),
+# including multi-line alt text. Used to strip image refs when --no-images.
+_IMAGE_REF_RE = re.compile(r'!\[[^\]]*\]\([^)]*\)')
+
+
+def strip_image_refs(markdown: str) -> str:
+    """Remove all ![alt](src) image references from Markdown.
+
+    Drops image-only lines entirely (avoids blank line scars) and removes
+    inline image refs from text lines.
+    """
+    cleaned_lines: list[str] = []
+    for line in markdown.splitlines():
+        stripped = _IMAGE_REF_RE.sub("", line)
+        # If the original line was just image refs (now whitespace), drop it.
+        if line.strip() and not stripped.strip():
+            continue
+        cleaned_lines.append(stripped)
+    # Collapse 3+ blank lines into 2 to tidy up.
+    text = "\n".join(cleaned_lines)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text
 
 
 def load_config() -> dict[str, object]:
@@ -367,28 +392,30 @@ class MinerUClient:
         zip_url: str,
         output_dir: str,
         output_filename: str | None = None,
-        extract_md: bool = True
+        extract_md: bool = True,
+        no_images: bool = False,
     ) -> str:
         """
         Download and extract result archive.
-        
+
         Args:
             zip_url: Result ZIP archive URL.
             output_dir: Output directory.
             output_filename: Output filename (without extension); defaults to the original name.
             extract_md: Whether to extract only Markdown files.
-        
+            no_images: When True, drop the images folder and strip image references from the Markdown.
+
         Returns:
             Markdown file path or output directory.
         """
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
-        
+
         # Download ZIP file
         response = requests.get(zip_url)
         if response.status_code != 200:
             raise Exception(f"Download failed: HTTP {response.status_code}")
-        
+
         # Extract archive
         with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
             # 1. Create mineru directory (for all raw extracted resources)
@@ -405,22 +432,28 @@ class MinerUClient:
                 # Only process the first MD file found
                 md_rel_path = md_files[0]
                 source_md = extract_dir / md_rel_path
-                
+
                 # Use the PDF stem as the target filename
                 dest_md_name = f"{output_filename}.md" if output_filename else Path(md_rel_path).name
                 dest_md_path = output_path / dest_md_name
-                
-                # Read and write
-                dest_md_path.write_bytes(source_md.read_bytes())
+
+                if no_images:
+                    md_text = source_md.read_text(encoding="utf-8", errors="replace")
+                    md_text = strip_image_refs(md_text)
+                    dest_md_path.write_text(md_text, encoding="utf-8")
+                else:
+                    dest_md_path.write_bytes(source_md.read_bytes())
                 print(f"[OK] Markdown saved to: {dest_md_path}")
                 final_md_path = str(dest_md_path)
 
             # 3. Find images folder and sync to root images/
             source_images_dir = extract_dir / "images"
-            if source_images_dir.exists() and source_images_dir.is_dir():
+            if no_images:
+                print("[OK] Images skipped (--no-images)")
+            elif source_images_dir.exists() and source_images_dir.is_dir():
                 dest_images_dir = output_path / "images"
                 dest_images_dir.mkdir(parents=True, exist_ok=True)
-                
+
                 import shutil
                 for img_file in source_images_dir.glob("*"):
                     if img_file.is_file():
@@ -429,7 +462,7 @@ class MinerUClient:
 
             # If no MD file found, return the extraction directory
             return final_md_path or str(extract_dir)
-        
+
         return str(output_path)
 
 
@@ -438,6 +471,7 @@ def convert_local_file(
     output_dir: str | None = None,
     token: str | None = None,
     model_version: str = "vlm",
+    no_images: bool = False,
     **kwargs
 ) -> str:
     """
@@ -480,6 +514,7 @@ def convert_local_file(
             zip_url,
             output_dir,
             output_filename=output_filename,
+            no_images=no_images,
         )
         print("-" * 40)
         print(f"[DONE] Conversion complete: {md_path}")
@@ -494,6 +529,7 @@ def convert_url(
     output_dir: str = "./output",
     token: str | None = None,
     model_version: str = "vlm",
+    no_images: bool = False,
     **kwargs
 ) -> str:
     """
@@ -524,7 +560,7 @@ def convert_url(
     # Download result
     if result.get("state") == "done":
         zip_url = result["full_zip_url"]
-        md_path = client.download_and_extract(zip_url, output_dir)
+        md_path = client.download_and_extract(zip_url, output_dir, no_images=no_images)
         print("-" * 40)
         print(f"[DONE] Conversion complete: {md_path}")
         return md_path
@@ -537,6 +573,7 @@ def convert_batch(
     output_dir: str | None = None,
     token: str | None = None,
     model_version: str = "vlm",
+    no_images: bool = False,
     **kwargs
 ) -> list[str]:
     """
@@ -582,6 +619,7 @@ def convert_batch(
                 zip_url,
                 target_dir,
                 output_filename=output_filename,
+                no_images=no_images,
             )
             md_paths.append(md_path)
         else:
@@ -636,6 +674,21 @@ Environment variables:
     parser.add_argument('--no-table', action='store_true', help='Disable table detection')
     parser.add_argument('--lang', default='ch', help='Document language (default: ch)')
     parser.add_argument('--pages', help='Page range, e.g. "1-10" or "2,4-6"')
+    parser.add_argument(
+        '--no-images',
+        action='store_true',
+        help='Skip image sync and strip image references from the Markdown',
+    )
+    parser.add_argument(
+        '--filter-images',
+        action='store_true',
+        help='Accepted for parity with convert.py (MinerU already filters internally; this is a no-op)',
+    )
+    parser.add_argument(
+        '--raw',
+        action='store_true',
+        help='Accepted for parity with convert.py (MinerU cloud processing is not adjustable from here)',
+    )
     
     args = parser.parse_args()
     
@@ -674,6 +727,7 @@ Environment variables:
                 output_dir=output_dir,
                 token=args.token,
                 model_version=args.model,
+                no_images=args.no_images,
                 **kwargs
             )
         elif args.files:
@@ -684,6 +738,7 @@ Environment variables:
                     output_dir=args.output,
                     token=args.token,
                     model_version=args.model,
+                    no_images=args.no_images,
                     **kwargs
                 )
             else:
@@ -693,6 +748,7 @@ Environment variables:
                     output_dir=args.output,  # Default None, output to each file's own directory
                     token=args.token,
                     model_version=args.model,
+                    no_images=args.no_images,
                     **kwargs
                 )
         else:

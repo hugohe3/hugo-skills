@@ -6,7 +6,6 @@ Supports heading levels, bold, italic, and list detection.
 """
 
 import argparse
-import hashlib
 import os
 import re
 import sys
@@ -18,6 +17,10 @@ try:
 except ImportError:
     print("[ERROR] PyMuPDF not installed. Run: pip install PyMuPDF", file=sys.stderr)
     sys.exit(1)
+
+# Local sibling module — kept private to this skill.
+sys.path.insert(0, str(Path(__file__).parent))
+from _image_filter import should_keep_image as _should_keep_image_generic  # noqa: E402
 
 FONT_BODY_SIZE = 12
 FONT_H1_SIZE = 24
@@ -321,16 +324,6 @@ def merge_adjacent_headings(elements: list) -> list:
     return merged
 
 
-# Image filtering thresholds
-MIN_IMAGE_PIXELS = 100       # Minimum pixel dimension (width AND height)
-MIN_IMAGE_AREA = 30000       # Minimum pixel area (e.g. 200x150)
-MIN_IMAGE_BYTES = 2048       # Minimum image data size (2KB)
-MIN_PAGE_RATIO = 0.05        # Minimum render size relative to page (5%)
-MAX_ASPECT_RATIO = 12        # Maximum aspect ratio (filters decorative bars)
-MAX_LOW_INFO_BPP = 0.08      # Bytes-per-pixel threshold for low-info images
-MAX_LOW_INFO_AREA = 500000   # Area threshold: only apply bpp filter below this
-
-
 def should_keep_image(
     block: dict[str, object],
     page_rect: fitz.Rect,
@@ -338,59 +331,25 @@ def should_keep_image(
 ) -> bool:
     """Filter out small, decorative, or duplicate images.
 
-    Args:
-        block: Image block extracted from PyMuPDF.
-        page_rect: Current page rectangle.
-        seen_hashes: Optional set used to deduplicate image payloads.
-
-    Returns:
-        Whether the image should be kept in the Markdown output.
+    Thin adapter that maps a PyMuPDF image block onto the shared
+    `_image_filter.should_keep_image` heuristics.
     """
-    w, h = block.get("width", 0), block.get("height", 0)
+    width = int(block.get("width", 0) or 0)
+    height = int(block.get("height", 0) or 0)
+    image_data = block.get("image", b"") or b""
 
-    # Pixel dimension filter
-    if w < MIN_IMAGE_PIXELS or h < MIN_IMAGE_PIXELS:
-        return False
-
-    # Pixel area filter
-    area = w * h
-    if area < MIN_IMAGE_AREA:
-        return False
-
-    image_data = block.get("image", b"")
-    if len(image_data) < MIN_IMAGE_BYTES:
-        return False
-
-    # Deduplicate: skip images with identical content (e.g. repeated backgrounds)
-    if seen_hashes is not None:
-        img_hash = hashlib.md5(image_data).hexdigest()
-        if img_hash in seen_hashes:
-            return False
-        seen_hashes.add(img_hash)
-
-    # Check render size relative to page
     bbox = block.get("bbox", (0, 0, 0, 0))
-    render_w = bbox[2] - bbox[0]
-    render_h = bbox[3] - bbox[1]
-    page_w = page_rect.width
-    page_h = page_rect.height
-    if page_w > 0 and page_h > 0:
-        if render_w / page_w < MIN_PAGE_RATIO and render_h / page_h < MIN_PAGE_RATIO:
-            return False
+    render_w = float(bbox[2]) - float(bbox[0])
+    render_h = float(bbox[3]) - float(bbox[1])
 
-    # Filter extreme aspect ratios (decorative bars/separators)
-    aspect = max(w, h) / max(min(w, h), 1)
-    if aspect > MAX_ASPECT_RATIO:
-        return False
-
-    # Filter low-info images: solid color blocks / gradients have very high
-    # compression ratios (low bytes-per-pixel). Only apply to smaller images
-    # to avoid filtering large photos with dark/uniform backgrounds.
-    bpp = len(image_data) / area
-    if bpp < MAX_LOW_INFO_BPP and area < MAX_LOW_INFO_AREA:
-        return False
-
-    return True
+    return _should_keep_image_generic(
+        image_data,
+        width,
+        height,
+        page_size=(page_rect.width, page_rect.height),
+        render_size=(render_w, render_h),
+        seen_hashes=seen_hashes,
+    )
 
 
 def clean_text(text: str) -> str:
@@ -455,12 +414,14 @@ def should_merge_lines(current: dict, next_line: dict) -> bool:
     return True
 
 
-def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str = "all") -> str:
+def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str = "all", raw: bool = False) -> str:
     """Extract text, images, and tables from a PDF and convert to Markdown.
 
     images: "all" = extract without filtering (default),
             "filtered" = extract with size/quality filters,
             "none" = skip all images
+    raw: When True, faithfully reproduce the PDF — skip header/footer dedup
+         and font-size-based heading detection. Useful for archival fidelity.
     """
     try:
         doc = fitz.open(pdf_path)
@@ -476,17 +437,22 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str 
     filename = Path(pdf_path).stem
     title = re.sub(r'^\d+-', '', filename).strip()
 
-    print(f"[INFO] Analyzing document structure...")
-    size_map = analyze_font_sizes(doc)
-    print(f"   Font size mapping: body={size_map.get('body', 'N/A')}, " +
-          f"H1={size_map.get('h1', 'N/A')}, H2={size_map.get('h2', 'N/A')}, H3={size_map.get('h3', 'N/A')}")
+    if raw:
+        print(f"[INFO] Raw mode — heading detection and header/footer dedup disabled")
+        size_map = {}  # No heading detection — every line is body text
+        noise_texts = set()  # No header/footer dedup
+    else:
+        print(f"[INFO] Analyzing document structure...")
+        size_map = analyze_font_sizes(doc)
+        print(f"   Font size mapping: body={size_map.get('body', 'N/A')}, " +
+              f"H1={size_map.get('h1', 'N/A')}, H2={size_map.get('h2', 'N/A')}, H3={size_map.get('h3', 'N/A')}")
 
-    print(f"[INFO] Detecting repeated headers/footers...")
-    noise_texts = detect_headers_footers(doc)
-    if noise_texts:
-        print(f"   Found {len(noise_texts)} repeated noise texts (will be removed):")
-        for t in list(noise_texts)[:3]:
-            print(f"     - {t[:30]}...")
+        print(f"[INFO] Detecting repeated headers/footers...")
+        noise_texts = detect_headers_footers(doc)
+        if noise_texts:
+            print(f"   Found {len(noise_texts)} repeated noise texts (will be removed):")
+            for t in list(noise_texts)[:3]:
+                print(f"     - {t[:30]}...")
 
     markdown_content = f"# {title}\n\n"
     seen_image_hashes = set()  # Track seen image hashes for deduplication
@@ -753,7 +719,7 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str 
     return markdown_content
 
 
-def process_directory(input_dir: str, output_dir: str | None = None, images: str = "all") -> None:
+def process_directory(input_dir: str, output_dir: str | None = None, images: str = "all", raw: bool = False) -> None:
     """Convert all PDFs in a directory to Markdown.
 
     Args:
@@ -775,7 +741,7 @@ def process_directory(input_dir: str, output_dir: str | None = None, images: str
     for pdf_file in pdf_files:
         output_file = output_path / (pdf_file.stem + '.md')
         print(f"Processing: {pdf_file.name}")
-        extract_pdf_to_markdown(str(pdf_file), str(output_file), images=images)
+        extract_pdf_to_markdown(str(pdf_file), str(output_file), images=images, raw=raw)
 
 
 def main() -> int:
@@ -808,16 +774,41 @@ Structure detection features:
         default='all',
         help='Image extraction mode: all=no filtering (default), filtered=apply size/quality filters, none=skip images',
     )
+    parser.add_argument(
+        '--filter-images',
+        action='store_true',
+        help='Alias for --images filtered (matches convert.py convention)',
+    )
+    parser.add_argument(
+        '--no-images',
+        action='store_true',
+        help='Alias for --images none (matches convert.py convention)',
+    )
+    parser.add_argument(
+        '--raw',
+        action='store_true',
+        help='Faithful reproduction: skip header/footer dedup and heading detection',
+    )
 
     args = parser.parse_args()
+
+    # Resolve --images / --filter-images / --no-images precedence
+    if args.no_images and args.filter_images:
+        print("Error: --no-images and --filter-images are mutually exclusive.")
+        return 2
+    images = args.images
+    if args.no_images:
+        images = 'none'
+    elif args.filter_images:
+        images = 'filtered'
 
     input_path = Path(args.input)
 
     if input_path.is_file():
         output = args.output or str(input_path.with_suffix('.md'))
-        extract_pdf_to_markdown(str(input_path), output, images=args.images)
+        extract_pdf_to_markdown(str(input_path), output, images=images, raw=args.raw)
     elif input_path.is_dir():
-        process_directory(str(input_path), args.output, images=args.images)
+        process_directory(str(input_path), args.output, images=images, raw=args.raw)
     else:
         print(f"Error: File or directory not found: {args.input}")
         return 1
