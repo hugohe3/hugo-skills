@@ -334,6 +334,107 @@ def _convert_html(input_file: Path, out_file: Path, no_images: bool = False, fil
 # EPUB → Markdown (ebooklib + markdownify)
 # ─────────────────────────────────────────────────────────────
 
+def _sanitize_epub_manifest(src: Path) -> tuple[Path, bool]:
+    """Return (epub_path, is_temp_copy).
+
+    Some EPUBs (notably those produced by calibre's EpubSplit plugin) leave
+    placeholder ``<item>`` entries in the OPF manifest pointing at files that
+    never made it into the ZIP (e.g. ``href="OEBPS/XXXXXXXXXXXXXXXX"``).
+    ``ebooklib.epub.read_epub`` calls ``read_file`` on every manifest item
+    eagerly, so a single missing entry raises ``KeyError`` and aborts the
+    whole conversion.
+
+    This helper scans the OPF, drops any ``item`` whose ``href`` is not
+    actually present in the archive (and the matching ``spine`` references),
+    and writes a sanitized copy to a temp file. When the manifest is clean
+    the original path is returned unchanged.
+    """
+    import posixpath
+    import tempfile
+    import zipfile
+    from xml.etree import ElementTree as ET
+
+    OPF_NS = "http://www.idpf.org/2007/opf"
+    CONT_NS = "urn:oasis:names:tc:opendocument:xmlns:container"
+
+    try:
+        with zipfile.ZipFile(src, "r") as zin:
+            names = set(zin.namelist())
+            if "META-INF/container.xml" not in names:
+                return src, False
+
+            container_root = ET.fromstring(zin.read("META-INF/container.xml"))
+            rootfile_el = container_root.find(f".//{{{CONT_NS}}}rootfile")
+            if rootfile_el is None:
+                return src, False
+            opf_path = rootfile_el.get("full-path")
+            if not opf_path or opf_path not in names:
+                return src, False
+
+            opf_bytes = zin.read(opf_path)
+            opf_root = ET.fromstring(opf_bytes)
+            manifest_el = opf_root.find(f"{{{OPF_NS}}}manifest")
+            if manifest_el is None:
+                return src, False
+
+            opf_dir = posixpath.dirname(opf_path)
+            bad_ids: list[str] = []
+            bad_hrefs: list[str] = []
+            for item_el in list(manifest_el.findall(f"{{{OPF_NS}}}item")):
+                href = item_el.get("href", "")
+                if not href:
+                    continue
+                rel = unquote(href)
+                zpath = posixpath.normpath(
+                    posixpath.join(opf_dir, rel) if opf_dir else rel
+                )
+                if zpath not in names:
+                    item_id = item_el.get("id", "")
+                    if item_id:
+                        bad_ids.append(item_id)
+                    bad_hrefs.append(href)
+                    manifest_el.remove(item_el)
+
+            if not bad_hrefs:
+                return src, False
+
+            spine_el = opf_root.find(f"{{{OPF_NS}}}spine")
+            if spine_el is not None and bad_ids:
+                for itemref in list(spine_el.findall(f"{{{OPF_NS}}}itemref")):
+                    if itemref.get("idref") in bad_ids:
+                        spine_el.remove(itemref)
+
+            ET.register_namespace("", OPF_NS)
+            ET.register_namespace("dc", "http://purl.org/dc/elements/1.1/")
+            new_opf = ET.tostring(opf_root, encoding="utf-8", xml_declaration=True)
+
+            tmp = tempfile.NamedTemporaryFile(suffix=".epub", delete=False)
+            tmp.close()
+            out_path = Path(tmp.name)
+
+            with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout:
+                if "mimetype" in names:
+                    zout.writestr(
+                        zipfile.ZipInfo("mimetype"),
+                        zin.read("mimetype"),
+                        compress_type=zipfile.ZIP_STORED,
+                    )
+                for name in zin.namelist():
+                    if name == "mimetype":
+                        continue
+                    if name == opf_path:
+                        zout.writestr(name, new_opf)
+                    else:
+                        zout.writestr(name, zin.read(name))
+
+            preview = ", ".join(bad_hrefs[:3]) + (" ..." if len(bad_hrefs) > 3 else "")
+            print(f"[INFO] EPUB manifest sanitized: removed {len(bad_hrefs)} broken item(s) [{preview}]")
+            return out_path, True
+    except (zipfile.BadZipFile, ET.ParseError, OSError) as exc:
+        print(f"[WARN] EPUB sanitize skipped ({exc.__class__.__name__}: {exc}); using original file")
+        return src, False
+
+
 def _convert_epub(input_file: Path, out_file: Path, no_images: bool = False, filter_images: bool = False) -> str:
     try:
         import ebooklib
@@ -352,7 +453,16 @@ def _convert_epub(input_file: Path, out_file: Path, no_images: bool = False, fil
         rel_media_dir = ""
     else:
         media_dir, rel_media_dir = _ensure_media_dir(out_file)
-    book = epub.read_epub(str(input_file))
+
+    sanitized_path, is_temp_copy = _sanitize_epub_manifest(input_file)
+    try:
+        book = epub.read_epub(str(sanitized_path))
+    finally:
+        if is_temp_copy:
+            try:
+                sanitized_path.unlink()
+            except OSError:
+                pass
 
     # Extract images, remembering original path → new filename mapping
     if not no_images:
