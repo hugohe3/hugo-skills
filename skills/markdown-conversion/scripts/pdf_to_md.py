@@ -28,6 +28,17 @@ FONT_H2_SIZE = 18
 FONT_H3_SIZE = 14
 HEADER_FOOTER_SAMPLE_LIMIT = 40
 HEADER_FOOTER_EDGE_SAMPLE_SIZE = 20
+VECTOR_RENDER_ZOOM = 2
+VECTOR_CLUSTER_TOLERANCE = 6
+VECTOR_MIN_WIDTH = 72
+VECTOR_MIN_HEIGHT = 36
+VECTOR_MIN_AREA = 3000
+VECTOR_CLIP_PADDING = 4
+VECTOR_CAPTION_SEARCH_HEIGHT = 380
+VECTOR_CAPTION_HORIZONTAL_GAP = 90
+MAX_VECTOR_BACKGROUND_AREA_RATIO = 1.9
+FIGURE_CAPTION_RE = re.compile(r'^(?:Figure|Fig\.)\s*\d+\s*[:.]', re.IGNORECASE)
+CONTROL_CHARS_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
 
 
 def analyze_font_sizes(doc: fitz.Document) -> dict[str, float]:
@@ -150,6 +161,7 @@ def is_monospace_font(font_name: str) -> bool:
 
 def format_span_text(text: str, flags: int) -> str:
     """Format text based on font flags (bold, italic)."""
+    text = CONTROL_CHARS_RE.sub('', text)
     text = text.strip()
     if not text:
         return ""
@@ -352,6 +364,241 @@ def should_keep_image(
     )
 
 
+def _overlap_ratio(rect: fitz.Rect, other: fitz.Rect) -> float:
+    """Return how much of rect is covered by other."""
+    area = rect.get_area()
+    if area <= 0:
+        return 0.0
+    return (rect & other).get_area() / area
+
+
+def _clip_rect_to_page(rect: fitz.Rect, page_rect: fitz.Rect) -> fitz.Rect:
+    """Clamp a rectangle to the current PDF page."""
+    return fitz.Rect(
+        max(page_rect.x0, rect.x0),
+        max(page_rect.y0, rect.y0),
+        min(page_rect.x1, rect.x1),
+        min(page_rect.y1, rect.y1),
+    )
+
+
+def _expand_rect(rect: fitz.Rect, padding: float, page_rect: fitz.Rect) -> fitz.Rect:
+    """Pad a rectangle and clamp it to the current PDF page."""
+    return _clip_rect_to_page(
+        fitz.Rect(
+            rect.x0 - padding,
+            rect.y0 - padding,
+            rect.x1 + padding,
+            rect.y1 + padding,
+        ),
+        page_rect,
+    )
+
+
+def _is_rect_contained(inner: fitz.Rect, outer: fitz.Rect, threshold: float = 0.9) -> bool:
+    """Return whether inner is mostly covered by outer."""
+    return _overlap_ratio(inner, outer) >= threshold
+
+
+def _is_white(color: tuple[float, ...] | None) -> bool:
+    """Return whether a PDF drawing color is visually white."""
+    if color is None:
+        return False
+    return all(channel >= 0.98 for channel in color[:3])
+
+
+def _is_background_drawing(drawing: dict[str, object]) -> bool:
+    """Identify white background rectangles that should not drive crops."""
+    return _is_white(drawing.get("fill")) and drawing.get("color") is None
+
+
+def _union_rects(rects: list[fitz.Rect]) -> fitz.Rect:
+    """Return the bounding union for one or more rectangles."""
+    result = fitz.Rect(rects[0])
+    for rect in rects[1:]:
+        result |= rect
+    return result
+
+
+def find_figure_caption_rects(page: fitz.Page) -> list[fitz.Rect]:
+    """Return text-line rectangles that look like figure captions."""
+    caption_rects = []
+    for block in page.get_text("dict")["blocks"]:
+        if block.get("type") != 0:
+            continue
+        for line in block["lines"]:
+            text = "".join(
+                CONTROL_CHARS_RE.sub('', span["text"])
+                for span in line["spans"]
+            ).strip()
+            if FIGURE_CAPTION_RE.match(text):
+                caption_rects.append(fitz.Rect(line["bbox"]))
+    return caption_rects
+
+
+def _find_captioned_vector_figures(
+    page: fitz.Page,
+    drawing_rects: list[fitz.Rect],
+    background_rects: list[fitz.Rect],
+    caption_rects: list[fitz.Rect],
+) -> list[fitz.Rect]:
+    """Build tight figure crops from non-background drawings above captions."""
+    figure_rects = []
+    page_rect = page.rect
+
+    for caption_rect in caption_rects:
+        related = []
+        for rect in drawing_rects:
+            horizontal_gap = max(caption_rect.x0 - rect.x1, rect.x0 - caption_rect.x1, 0)
+            if horizontal_gap > VECTOR_CAPTION_HORIZONTAL_GAP:
+                continue
+            if rect.y0 > caption_rect.y0:
+                continue
+            if caption_rect.y0 - rect.y1 > VECTOR_CAPTION_SEARCH_HEIGHT:
+                continue
+            related.append(rect)
+
+        if not related:
+            continue
+
+        content_rect = _union_rects(related)
+        figure_rect = content_rect
+        for background_rect in background_rects:
+            background_rect = _clip_rect_to_page(background_rect, page_rect)
+            if not _is_rect_contained(content_rect, background_rect, threshold=0.95):
+                continue
+            if background_rect.get_area() > content_rect.get_area() * MAX_VECTOR_BACKGROUND_AREA_RATIO:
+                continue
+            figure_rect = background_rect
+            break
+
+        figure_rect = _expand_rect(figure_rect, 10, page_rect)
+        figure_rect.y1 = min(figure_rect.y1, caption_rect.y0 - 2)
+        if figure_rect.width >= VECTOR_MIN_WIDTH and figure_rect.height >= VECTOR_MIN_HEIGHT:
+            figure_rects.append(figure_rect)
+
+    return figure_rects
+
+
+def detect_vector_figure_rects(page: fitz.Page) -> list[fitz.Rect]:
+    """Detect vector drawing regions that should be rasterized as figures."""
+    try:
+        drawings = page.get_drawings()
+    except Exception as exc:
+        print(f"  [WARN] Failed to inspect vector drawings on P{page.number + 1}: {exc}")
+        return []
+
+    drawing_rects = []
+    background_rects = []
+    for drawing in drawings:
+        rect = drawing.get("rect")
+        if not rect:
+            continue
+        rect = fitz.Rect(rect)
+        if rect.is_empty or rect.is_infinite:
+            continue
+        if _is_background_drawing(drawing):
+            background_rects.append(rect)
+        else:
+            drawing_rects.append(rect)
+
+    caption_rects = find_figure_caption_rects(page)
+    captioned = _find_captioned_vector_figures(
+        page,
+        drawing_rects,
+        background_rects,
+        caption_rects,
+    )
+    if captioned:
+        return captioned
+
+    try:
+        return [
+            fitz.Rect(rect)
+            for rect in page.cluster_drawings(
+                drawings=drawings,
+                x_tolerance=VECTOR_CLUSTER_TOLERANCE,
+                y_tolerance=VECTOR_CLUSTER_TOLERANCE,
+            )
+        ]
+    except Exception as exc:
+        print(f"  [WARN] Failed to cluster vector drawings on P{page.number + 1}: {exc}")
+        return []
+
+
+def should_keep_vector_rect(
+    rect: fitz.Rect,
+    page_rect: fitz.Rect,
+    table_rects: list[fitz.Rect],
+    image_rects: list[fitz.Rect],
+    *,
+    filtered: bool,
+) -> bool:
+    """Filter vector drawing clusters before rendering them as images."""
+    if rect.is_empty or rect.is_infinite:
+        return False
+
+    width = rect.width
+    height = rect.height
+    if width < VECTOR_MIN_WIDTH or height < VECTOR_MIN_HEIGHT:
+        return False
+    if width * height < VECTOR_MIN_AREA:
+        return False
+
+    # Tables are already converted to Markdown; rendering their grid lines would
+    # duplicate content and add noisy screenshots.
+    for table_rect in table_rects:
+        if _overlap_ratio(rect, table_rect) > 0.6:
+            return False
+
+    # Avoid producing a second PNG for vector overlays sitting on top of an
+    # embedded raster image.
+    for image_rect in image_rects:
+        if _overlap_ratio(rect, image_rect) > 0.6:
+            return False
+
+    if filtered:
+        page_w = max(page_rect.width, 1)
+        page_h = max(page_rect.height, 1)
+        if width / page_w < 0.08 and height / page_h < 0.08:
+            return False
+
+    return True
+
+
+def render_vector_rect(page: fitz.Page, rect: fitz.Rect) -> bytes:
+    """Render a vector drawing region to PNG bytes."""
+    clip = fitz.Rect(rect)
+    clip.x0 = max(page.rect.x0, clip.x0 - VECTOR_CLIP_PADDING)
+    clip.y0 = max(page.rect.y0, clip.y0 - VECTOR_CLIP_PADDING)
+    clip.x1 = min(page.rect.x1, clip.x1 + VECTOR_CLIP_PADDING)
+    clip.y1 = min(page.rect.y1, clip.y1 + VECTOR_CLIP_PADDING)
+    pixmap = page.get_pixmap(
+        matrix=fitz.Matrix(VECTOR_RENDER_ZOOM, VECTOR_RENDER_ZOOM),
+        clip=clip,
+        alpha=False,
+    )
+    return pixmap.tobytes("png")
+
+
+def remove_text_inside_vector_images(
+    page_elements: list[dict[str, object]],
+    vector_rects: list[fitz.Rect],
+) -> list[dict[str, object]]:
+    """Drop text lines already captured inside rendered vector images."""
+    if not vector_rects:
+        return page_elements
+
+    filtered = []
+    for element in page_elements:
+        if element.get("type") == 0 and element.get("bbox"):
+            text_rect = fitz.Rect(element["bbox"])
+            if any(_overlap_ratio(text_rect, vector_rect) > 0.8 for vector_rect in vector_rects):
+                continue
+        filtered.append(element)
+    return filtered
+
+
 def clean_text(text: str) -> str:
     """Clean extracted text."""
     lines = text.split('\n')
@@ -467,6 +714,7 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str 
     img_count = 0
 
     for page_num, page in enumerate(doc, 1):
+        page_img_count = 0
         if page_num > 1:
             # Add page break marker to help LLM understand context segmentation
             markdown_content += f"\n\n<!-- Page {page_num} -->\n\n"
@@ -479,6 +727,7 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str 
         tab_rects = [fitz.Rect(t.bbox) for t in tabs]
 
         page_elements = []
+        image_rects: list[fitz.Rect] = []
 
         for tab in tabs:
             page_elements.append({
@@ -519,7 +768,7 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str 
 
                     formatted_spans = []
                     for span in line["spans"]:
-                        span_text = span["text"]
+                        span_text = CONTROL_CHARS_RE.sub('', span["text"])
                         if not span_text.strip():
                             if span_text:
                                 formatted_spans.append(span_text)
@@ -573,21 +822,56 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str 
                         "content": final_text,
                         "is_heading": heading_level > 0,
                         "is_list": is_list,
-                        "is_code": is_code_line
+                        "is_code": is_code_line,
+                        "bbox": tuple(line["bbox"]),
                     })
 
             elif block["type"] == 1:
+                image_rects.append(block_rect)
                 if images == "none":
                     pass
                 elif images == "all" or should_keep_image(block, page.rect, seen_image_hashes):
                     page_elements.append({
                         "y0": block["bbox"][1],
                         "type": 1,
+                        "asset_kind": "raster",
                         "content": block
                     })
                 else:
                     w, h = block.get("width", 0), block.get("height", 0)
                     print(f"  [SKIP] Filtered small/decorative image: {w}x{h}px, {len(block.get('image', b''))} bytes")
+
+        rendered_vector_rects: list[fitz.Rect] = []
+        if images != "none":
+            for rect in detect_vector_figure_rects(page):
+                vector_rect = fitz.Rect(rect)
+                if not should_keep_vector_rect(
+                    vector_rect,
+                    page.rect,
+                    tab_rects,
+                    image_rects,
+                    filtered=(images == "filtered"),
+                ):
+                    continue
+                try:
+                    image_data = render_vector_rect(page, vector_rect)
+                except Exception as exc:
+                    print(f"  [WARN] Failed to render vector drawing on P{page_num}: {exc}")
+                    continue
+
+                page_elements.append({
+                    "y0": vector_rect.y0,
+                    "type": 1,
+                    "asset_kind": "vector",
+                    "content": {
+                        "bbox": tuple(vector_rect),
+                        "ext": "png",
+                        "image": image_data,
+                    },
+                })
+                rendered_vector_rects.append(vector_rect)
+
+        page_elements = remove_text_inside_vector_images(page_elements, rendered_vector_rects)
 
         page_elements.sort(key=lambda x: x["y0"])
 
@@ -681,23 +965,24 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str 
                     prev_was_code = False
                 if img_dir:
                     block = el["content"]
+                    asset_kind = el.get("asset_kind", "raster")
                     ext = block["ext"]
                     image_data = block["image"]
                     safe_filename = filename.replace(" ", "_")
-                    image_name = f"{safe_filename}_p{page_num}_{img_count}.{ext}"
+                    page_img_count += 1
+                    image_name = f"{safe_filename}_p{page_num}_{page_img_count:03d}.{ext}"
                     image_path = img_dir / image_name
 
                     try:
                         img_dir.mkdir(parents=True, exist_ok=True)
-                        with open(image_path, "wb") as f:
-                            f.write(image_data)
+                        image_path.write_bytes(image_data)
 
                         if prev_was_list:
                             markdown_content += "\n"
                         markdown_content += f"![{image_name}]({rel_img_dir}/{image_name})\n\n"
                         img_count += 1
                         prev_was_list = False
-                        print(f"  [OK] Extracted image: {image_name}")
+                        print(f"  [OK] Extracted {asset_kind} image: {image_name}")
                     except Exception as e:
                         print(f"  [WARN] Failed to save image: {e}")
 
@@ -707,6 +992,7 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str 
 
     doc.close()
 
+    markdown_content = CONTROL_CHARS_RE.sub('', markdown_content)
     markdown_content = re.sub(r'\n{3,}', '\n\n', markdown_content)
     markdown_content = markdown_content.strip() + "\n"
 
@@ -719,7 +1005,7 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str 
     return markdown_content
 
 
-def process_directory(input_dir: str, output_dir: str | None = None, images: str = "all", raw: bool = False) -> None:
+def process_directory(input_dir: str, output_dir: str | None = None, images: str = "all", raw: bool = False) -> int:
     """Convert all PDFs in a directory to Markdown.
 
     Args:
@@ -737,11 +1023,16 @@ def process_directory(input_dir: str, output_dir: str | None = None, images: str
     pdf_files = sorted(input_path.glob('*.pdf'))
 
     print(f"Found {len(pdf_files)} PDF files")
+    failures = 0
 
     for pdf_file in pdf_files:
         output_file = output_path / (pdf_file.stem + '.md')
         print(f"Processing: {pdf_file.name}")
-        extract_pdf_to_markdown(str(pdf_file), str(output_file), images=images, raw=raw)
+        result = extract_pdf_to_markdown(str(pdf_file), str(output_file), images=images, raw=raw)
+        if not result:
+            failures += 1
+
+    return failures
 
 
 def main() -> int:
@@ -806,14 +1097,14 @@ Structure detection features:
 
     if input_path.is_file():
         output = args.output or str(input_path.with_suffix('.md'))
-        extract_pdf_to_markdown(str(input_path), output, images=images, raw=args.raw)
+        result = extract_pdf_to_markdown(str(input_path), output, images=images, raw=args.raw)
+        return 0 if result else 1
     elif input_path.is_dir():
-        process_directory(str(input_path), args.output, images=images, raw=args.raw)
+        failures = process_directory(str(input_path), args.output, images=images, raw=args.raw)
+        return 0 if failures == 0 else 1
     else:
         print(f"Error: File or directory not found: {args.input}")
         return 1
-
-    return 0
 
 
 if __name__ == '__main__':
