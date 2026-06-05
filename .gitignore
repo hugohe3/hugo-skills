@@ -1,9 +1,22 @@
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+.venv/
+venv/
+env/
 
 # Local secrets
 skills/markdown-conversion/resources/config.json
 
 # Local projects (not tracked)
 projects/
+work/
+*.tmp
 .DS_Store

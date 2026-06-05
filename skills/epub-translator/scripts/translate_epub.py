@@ -19,6 +19,9 @@ from xml.etree import ElementTree as ET
 
 CONTAINER_PATH = "META-INF/container.xml"
 XHTML_NAMESPACE = "http://www.w3.org/1999/xhtml"
+OPF_NAMESPACE = "http://www.idpf.org/2007/opf"
+DC_NAMESPACE = "http://purl.org/dc/elements/1.1/"
+NCX_NAMESPACE = "http://www.daisy.org/z3986/2005/ncx/"
 SKIP_TAGS = {
     "script",
     "style",
@@ -66,6 +69,11 @@ def parse_args() -> argparse.Namespace:
         "--target-language",
         default="Simplified Chinese",
         help="Target language label recorded in manifest.json",
+    )
+    prepare.add_argument(
+        "--target-language-code",
+        default="zh-Hans",
+        help="EPUB language code written to metadata during build",
     )
     prepare.add_argument(
         "--chunk-chars",
@@ -129,8 +137,24 @@ def is_translatable_text(text: str) -> bool:
 
 
 def unpack_epub(input_path: Path, source_dir: Path) -> None:
+    source_root = source_dir.resolve()
     with zipfile.ZipFile(input_path, "r") as epub:
-        epub.extractall(source_dir)
+        for info in epub.infolist():
+            member_path = Path(info.filename)
+            if member_path.is_absolute() or ".." in member_path.parts:
+                fail(f"unsafe EPUB entry path: {info.filename}")
+
+            target_path = (source_dir / member_path).resolve()
+            if target_path != source_root and source_root not in target_path.parents:
+                fail(f"unsafe EPUB entry path: {info.filename}")
+
+            if info.is_dir():
+                target_path.mkdir(parents=True, exist_ok=True)
+                continue
+
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            with epub.open(info, "r") as source, target_path.open("wb") as target:
+                shutil.copyfileobj(source, target)
 
 
 def find_opf_path(source_dir: Path) -> Path:
@@ -147,11 +171,22 @@ def find_opf_path(source_dir: Path) -> Path:
     fail("could not find OPF package path in container.xml")
 
 
-def get_spine_documents(opf_path: Path) -> list[Path]:
+def resolve_manifest_href(base_dir: Path, href: str) -> Path:
+    normalized = posixpath.normpath(href.split("#", 1)[0])
+    return base_dir / normalized
+
+
+def append_unique(paths: list[Path], path: Path) -> None:
+    if path not in paths:
+        paths.append(path)
+
+
+def get_epub_translation_documents(opf_path: Path) -> tuple[list[Path], list[Path]]:
     tree = ET.parse(opf_path)
     root = tree.getroot()
-    manifest: dict[str, tuple[str, str]] = {}
+    manifest: dict[str, dict[str, str]] = {}
     spine_ids: list[str] = []
+    spine_toc_id = ""
 
     for element in root.iter():
         name = local_name(element.tag)
@@ -160,38 +195,80 @@ def get_spine_documents(opf_path: Path) -> list[Path]:
             href = element.attrib.get("href")
             media_type = element.attrib.get("media-type", "")
             if item_id and href:
-                manifest[item_id] = (href, media_type)
+                manifest[item_id] = {
+                    "href": href,
+                    "media_type": media_type,
+                    "properties": element.attrib.get("properties", ""),
+                }
+        elif name == "spine":
+            spine_toc_id = element.attrib.get("toc", "")
         elif name == "itemref":
             itemref = element.attrib.get("idref")
             if itemref:
                 spine_ids.append(itemref)
 
-    documents: list[Path] = []
+    xhtml_documents: list[Path] = []
+    xml_documents: list[Path] = []
     base_dir = opf_path.parent
     for item_id in spine_ids:
         item = manifest.get(item_id)
         if not item:
             continue
-        href, media_type = item
+        href = item["href"]
+        media_type = item["media_type"]
         if media_type not in {"application/xhtml+xml", "text/html"}:
             continue
-        normalized = posixpath.normpath(href.split("#", 1)[0])
-        documents.append(base_dir / normalized)
-    return documents
+        append_unique(xhtml_documents, resolve_manifest_href(base_dir, href))
+
+    for item_id, item in manifest.items():
+        href = item["href"]
+        media_type = item["media_type"]
+        properties = set(item["properties"].split())
+        if media_type in {"application/xhtml+xml", "text/html"} and "nav" in properties:
+            append_unique(xhtml_documents, resolve_manifest_href(base_dir, href))
+        if media_type == "application/x-dtbncx+xml" or item_id == spine_toc_id:
+            append_unique(xml_documents, resolve_manifest_href(base_dir, href))
+
+    append_unique(xml_documents, opf_path)
+    return xhtml_documents, xml_documents
 
 
-TAG_RE = re.compile(r"<[^>]+>")
+PLACEHOLDER_RE = re.compile(r"\[t:\d+\]")
 BLOCK_TAGS = {
     "p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "div", "blockquote", 
     "td", "th", "dt", "dd", "title", "caption"
 }
 
 
+def strip_xhtml_namespace(serialized: str) -> str:
+    return serialized.replace(f' xmlns="{XHTML_NAMESPACE}"', "")
+
+
+def element_tags(element: ET.Element) -> tuple[str, str] | tuple[str]:
+    empty_element = ET.Element(element.tag, dict(element.attrib))
+    if not list(element) and not element.text:
+        tag = ET.tostring(empty_element, encoding="unicode", short_empty_elements=True)
+        return (strip_xhtml_namespace(tag),)
+
+    serialized = ET.tostring(empty_element, encoding="unicode", short_empty_elements=False)
+    serialized = strip_xhtml_namespace(serialized)
+    close_index = serialized.rfind("</")
+    if close_index == -1:
+        return (serialized,)
+    return serialized[:close_index], serialized[close_index:]
+
+
+def append_tag_placeholder(parts: list[str], tags: list[str], tag: str) -> None:
+    index = len(tags)
+    tags.append(tag)
+    parts.append(f"[t:{index}]")
+
+
 def serialize_block(
-    E: ET.Element,
+    element: ET.Element,
     processed_nodes: set[tuple[int, str]]
 ) -> tuple[str, list[str]]:
-    processed_nodes.add((id(E), "text"))
+    processed_nodes.add((id(element), "text"))
     
     def recurse(el: ET.Element):
         processed_nodes.add((id(el), "text"))
@@ -200,26 +277,33 @@ def serialize_block(
             processed_nodes.add((id(child), "tail"))
             recurse(child)
             
-    recurse(E)
+    recurse(element)
     
-    inner_xml_parts = []
-    if E.text:
-        inner_xml_parts.append(E.text)
-    for child in E:
-        child_xml = ET.tostring(child, encoding="utf-8").decode("utf-8")
-        child_xml = child_xml.replace(' xmlns="http://www.w3.org/1999/xhtml"', '')
-        inner_xml_parts.append(child_xml)
-    inner_xml_str = "".join(inner_xml_parts)
-    
-    tags = []
-    def replace_tag(match):
-        tag = match.group(0)
-        idx = len(tags)
-        tags.append(tag)
-        return f"[t:{idx}]"
-        
-    serialized_str = TAG_RE.sub(replace_tag, inner_xml_str)
-    return serialized_str, tags
+    parts: list[str] = []
+    tags: list[str] = []
+
+    def append_child(child: ET.Element) -> None:
+        child_tags = element_tags(child)
+        if len(child_tags) == 1:
+            append_tag_placeholder(parts, tags, child_tags[0])
+        else:
+            start_tag, end_tag = child_tags
+            append_tag_placeholder(parts, tags, start_tag)
+            if child.text:
+                parts.append(child.text)
+            for grandchild in child:
+                append_child(grandchild)
+            append_tag_placeholder(parts, tags, end_tag)
+
+        if child.tail:
+            parts.append(child.tail)
+
+    if element.text:
+        parts.append(element.text)
+    for child in element:
+        append_child(child)
+
+    return "".join(parts), tags
 
 
 def collect_text_slots(
@@ -308,6 +392,60 @@ def collect_text_slots(
     return slots
 
 
+def collect_ncx_slots(
+    root: ET.Element,
+    document: str,
+    counters: dict[str, int]
+) -> list[TextSlot]:
+    slots: list[TextSlot] = []
+
+    def visit(element: ET.Element, path: list[int]) -> None:
+        if local_name(element.tag).lower() == "text" and is_translatable_text(element.text or ""):
+            counters["slot"] += 1
+            slot_id = f"t{counters['slot']:06d}"
+            slots.append(TextSlot(
+                slot_id=slot_id,
+                document=document,
+                path=path,
+                attribute="text",
+                source=element.text or "",
+                tags=[],
+            ))
+
+        for index, child in enumerate(list(element)):
+            visit(child, [*path, index])
+
+    visit(root, [])
+    return slots
+
+
+def collect_opf_metadata_slots(
+    root: ET.Element,
+    document: str,
+    counters: dict[str, int]
+) -> list[TextSlot]:
+    slots: list[TextSlot] = []
+
+    def visit(element: ET.Element, path: list[int]) -> None:
+        if local_name(element.tag).lower() == "title" and is_translatable_text(element.text or ""):
+            counters["slot"] += 1
+            slot_id = f"t{counters['slot']:06d}"
+            slots.append(TextSlot(
+                slot_id=slot_id,
+                document=document,
+                path=path,
+                attribute="text",
+                source=element.text or "",
+                tags=[],
+            ))
+
+        for index, child in enumerate(list(element)):
+            visit(child, [*path, index])
+
+    visit(root, [])
+    return slots
+
+
 def batch_slots(slots: list[TextSlot], max_chars: int) -> Iterable[list[TextSlot]]:
     batch: list[TextSlot] = []
     current_chars = 0
@@ -322,6 +460,40 @@ def batch_slots(slots: list[TextSlot], max_chars: int) -> Iterable[list[TextSlot
         current_chars += slot_len
     if batch:
         yield batch
+
+
+def validate_placeholders(slot: dict, translation: str, document: str, allow_missing: bool) -> bool:
+    tags = slot.get("tags", [])
+    if not tags:
+        return True
+
+    expected = [f"[t:{index}]" for index in range(len(tags))]
+    actual = PLACEHOLDER_RE.findall(translation)
+    if actual == expected:
+        return True
+
+    print(
+        f"ERROR: {slot['id']} in {document}: placeholder mismatch. "
+        f"expected={expected} actual={actual}",
+        file=sys.stderr,
+    )
+    print(f"Original source: {slot['source']}", file=sys.stderr)
+    print(f"Translated text: {translation}", file=sys.stderr)
+    if allow_missing:
+        return False
+    raise SystemExit(1)
+
+
+def validate_placeholders_for_check(slot: dict, translation: str, location: str) -> str | None:
+    tags = slot.get("tags", [])
+    if not tags:
+        return None
+
+    expected = [f"[t:{index}]" for index in range(len(tags))]
+    actual = PLACEHOLDER_RE.findall(translation)
+    if actual == expected:
+        return None
+    return f"{location}: placeholder mismatch for {slot['id']}: expected={expected} actual={actual}"
 
 
 def prepare_command(args: argparse.Namespace) -> None:
@@ -345,16 +517,19 @@ def prepare_command(args: argparse.Namespace) -> None:
 
     unpack_epub(args.input, source_dir)
     opf_path = find_opf_path(source_dir)
-    documents = get_spine_documents(opf_path)
-    if not documents:
+    xhtml_documents, xml_documents = get_epub_translation_documents(opf_path)
+    if not xhtml_documents and not xml_documents:
         fail("no XHTML spine documents found")
 
     ET.register_namespace("", XHTML_NAMESPACE)
+    ET.register_namespace("opf", OPF_NAMESPACE)
+    ET.register_namespace("dc", DC_NAMESPACE)
+    ET.register_namespace("ncx", NCX_NAMESPACE)
     counters = {"slot": 0}
     all_slots: list[TextSlot] = []
     document_records: list[str] = []
 
-    for document_path in documents:
+    for document_path in xhtml_documents:
         relative = document_path.relative_to(source_dir).as_posix()
         document_records.append(relative)
         try:
@@ -364,13 +539,29 @@ def prepare_command(args: argparse.Namespace) -> None:
             continue
         all_slots.extend(collect_text_slots(tree.getroot(), relative, counters))
 
+    for document_path in xml_documents:
+        relative = document_path.relative_to(source_dir).as_posix()
+        document_records.append(relative)
+        try:
+            tree = ET.parse(document_path)
+        except ET.ParseError as error:
+            print(f"SKIP: {relative}: XML parse error: {error}", file=sys.stderr)
+            continue
+        root = tree.getroot()
+        if document_path == opf_path:
+            all_slots.extend(collect_opf_metadata_slots(root, relative, counters))
+        else:
+            all_slots.extend(collect_ncx_slots(root, relative, counters))
+
     manifest = {
         "input": str(args.input),
         "source_language": args.source_language,
         "target_language": args.target_language,
+        "target_language_code": args.target_language_code,
         "source_dir": "source",
         "chunks_dir": "chunks",
         "translated_dir": "translated",
+        "opf_document": opf_path.relative_to(source_dir).as_posix(),
         "documents": document_records,
         "slots": [
             {
@@ -414,12 +605,19 @@ def read_manifest(work_dir: Path) -> dict:
     return json.loads(manifest_path.read_text(encoding="utf-8"))
 
 
-def read_translations(work_dir: Path) -> dict[str, str]:
+def read_translations(
+    work_dir: Path,
+    slots: list[dict],
+    allow_missing: bool = False,
+    validate_tags: bool = True,
+) -> dict[str, str]:
     translated_dir = work_dir / "translated"
     if not translated_dir.exists():
         fail(f"missing translated directory: {translated_dir}")
 
+    slot_by_id = {slot["id"]: slot for slot in slots}
     translations: dict[str, str] = {}
+    errors: list[str] = []
     for path in sorted(translated_dir.glob("*.jsonl")):
         with path.open("r", encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, start=1):
@@ -431,15 +629,51 @@ def read_translations(work_dir: Path) -> dict[str, str]:
                     fail(f"invalid JSON in {path}:{line_number}: {error}")
                 slot_id = record.get("id")
                 translation = record.get("translation")
-                if isinstance(slot_id, str) and isinstance(translation, str) and translation:
-                    translations[slot_id] = translation
+                location = f"{path}:{line_number}"
+
+                if not isinstance(slot_id, str) or not slot_id:
+                    errors.append(f"{location}: missing or invalid id")
+                    continue
+                if slot_id not in slot_by_id:
+                    errors.append(f"{location}: unknown id {slot_id}")
+                    continue
+                if slot_id in translations:
+                    errors.append(f"{location}: duplicate id {slot_id}")
+                    continue
+                if not isinstance(translation, str):
+                    errors.append(f"{location}: translation must be a string")
+                    continue
+                if not translation.strip():
+                    if not allow_missing:
+                        errors.append(f"{location}: blank translation for {slot_id}")
+                    continue
+
+                if validate_tags:
+                    placeholder_error = validate_placeholders_for_check(
+                        slot_by_id[slot_id],
+                        translation,
+                        location,
+                    )
+                    if placeholder_error:
+                        errors.append(placeholder_error)
+                        continue
+
+                translations[slot_id] = translation
+
+    if errors:
+        for error in errors[:50]:
+            print(f"ERROR: {error}", file=sys.stderr)
+        if len(errors) > 50:
+            print(f"ERROR: ... {len(errors) - 50} more validation errors", file=sys.stderr)
+        raise SystemExit(1)
+
     return translations
 
 
 def check_command(args: argparse.Namespace) -> None:
     manifest = read_manifest(args.work_dir)
     slots = manifest.get("slots", [])
-    translations = read_translations(args.work_dir)
+    translations = read_translations(args.work_dir, slots)
     missing = [slot["id"] for slot in slots if slot["id"] not in translations]
     print(f"TOTAL: {len(slots)}")
     print(f"TRANSLATED: {len(translations)}")
@@ -485,6 +719,8 @@ def apply_translations_to_document(
         if attribute == "block":
             tags = slot.get("tags", [])
             translated_xml = translation
+            if not validate_placeholders(slot, translation, document, allow_missing):
+                continue
             # Restore original tags in placeholders
             for idx, tag in enumerate(tags):
                 translated_xml = translated_xml.replace(f"[t:{idx}]", tag)
@@ -508,8 +744,9 @@ def apply_translations_to_document(
                 print(f"Original source: {slot['source']}", file=sys.stderr)
                 print(f"Translated text: {translation}", file=sys.stderr)
                 print(f"Restored XML: {translated_xml}", file=sys.stderr)
-                if not allow_missing:
-                    raise SystemExit(1)
+                if allow_missing:
+                    continue
+                raise SystemExit(1)
         elif attribute == "text":
             element.text = translation
         else:
@@ -543,16 +780,40 @@ def write_epub(source_dir: Path, output_path: Path) -> None:
     shutil.move(temp_output, output_path)
 
 
+def update_opf_language(opf_path: Path, target_language_code: str) -> None:
+    if not target_language_code or not opf_path.exists():
+        return
+
+    tree = ET.parse(opf_path)
+    root = tree.getroot()
+    updated = False
+    for element in root.iter():
+        if local_name(element.tag).lower() == "language":
+            element.text = target_language_code
+            updated = True
+
+    if updated:
+        tree.write(opf_path, encoding="utf-8", xml_declaration=True)
+
+
 def build_command(args: argparse.Namespace) -> None:
     manifest = read_manifest(args.work_dir)
-    translations = read_translations(args.work_dir)
+    slots = manifest.get("slots", [])
+    translations = read_translations(
+        args.work_dir,
+        slots,
+        allow_missing=args.allow_missing,
+    )
     source_dir = args.work_dir / manifest.get("source_dir", "source")
     if not source_dir.exists():
         fail(f"missing source directory: {source_dir}")
 
     ET.register_namespace("", XHTML_NAMESPACE)
+    ET.register_namespace("opf", OPF_NAMESPACE)
+    ET.register_namespace("dc", DC_NAMESPACE)
+    ET.register_namespace("ncx", NCX_NAMESPACE)
     slots_by_document: dict[str, list[dict]] = {}
-    for slot in manifest.get("slots", []):
+    for slot in slots:
         slots_by_document.setdefault(slot["document"], []).append(slot)
 
     applied = 0
@@ -563,6 +824,13 @@ def build_command(args: argparse.Namespace) -> None:
             slots,
             translations,
             args.allow_missing,
+        )
+
+    opf_document = manifest.get("opf_document")
+    if isinstance(opf_document, str):
+        update_opf_language(
+            source_dir / opf_document,
+            manifest.get("target_language_code", "zh-Hans"),
         )
 
     write_epub(source_dir, args.output)
