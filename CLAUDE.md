@@ -19,6 +19,7 @@ skills/<skill-name>/
 - 不提交密钥——使用环境变量或 gitignore 的配置文件。
 - 保持技能平台无关：`SKILL.md` frontmatter 只使用通用字段，避免写入特定平台专属配置。
 - 代码（变量名、函数名、注释）使用英文；文档（`SKILL.md`、`README.md`、`CLAUDE.md` 等 `.md` 文件）以简体中文为主。
+- Markdown 格式规范：在中文文档中对词汇进行加粗时，应避免星号 `**` 直接贴合中文全角标点（如 `“`、`”`、`《`、`》` 等），否则在部分解析器中会导致加粗渲染失效。最佳实践是“标点外置”，例如使用 `“**词汇**”` 而非 `**“词汇”**`，或者在加粗块的前后保留空格。
 - Commit message 使用 Conventional Commits 风格，格式为 `type(scope): 中文描述` 或 `type: 中文描述`；`type` / `scope` 保持英文，描述使用简体中文。示例：`feat(learning-master): 添加六阶段学习工作流技能`、`docs: 完善通用技能安装和使用说明`。
 
 ## 添加新技能
