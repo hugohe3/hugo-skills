@@ -6,3 +6,4 @@ skills/markdown-conversion/resources/config.json
 
 # Local projects (not tracked)
 projects/
+.DS_Store
