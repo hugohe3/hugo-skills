@@ -39,6 +39,7 @@ class TextSlot:
     path: list[int]
     attribute: str
     source: str
+    tags: list[str]
 
 
 def parse_args() -> argparse.Namespace:
@@ -179,39 +180,132 @@ def get_spine_documents(opf_path: Path) -> list[Path]:
     return documents
 
 
+TAG_RE = re.compile(r"<[^>]+>")
+BLOCK_TAGS = {
+    "p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "div", "blockquote", 
+    "td", "th", "dt", "dd", "title", "caption"
+}
+
+
+def serialize_block(
+    E: ET.Element,
+    processed_nodes: set[tuple[int, str]]
+) -> tuple[str, list[str]]:
+    processed_nodes.add((id(E), "text"))
+    
+    def recurse(el: ET.Element):
+        processed_nodes.add((id(el), "text"))
+        for child in el:
+            processed_nodes.add((id(child), "text"))
+            processed_nodes.add((id(child), "tail"))
+            recurse(child)
+            
+    recurse(E)
+    
+    inner_xml_parts = []
+    if E.text:
+        inner_xml_parts.append(E.text)
+    for child in E:
+        child_xml = ET.tostring(child, encoding="utf-8").decode("utf-8")
+        child_xml = child_xml.replace(' xmlns="http://www.w3.org/1999/xhtml"', '')
+        inner_xml_parts.append(child_xml)
+    inner_xml_str = "".join(inner_xml_parts)
+    
+    tags = []
+    def replace_tag(match):
+        tag = match.group(0)
+        idx = len(tags)
+        tags.append(tag)
+        return f"[t:{idx}]"
+        
+    serialized_str = TAG_RE.sub(replace_tag, inner_xml_str)
+    return serialized_str, tags
+
+
 def collect_text_slots(
-    element: ET.Element,
+    root: ET.Element,
     document: str,
-    path: list[int],
-    counters: dict[str, int],
-    inherited_skip: bool = False,
+    counters: dict[str, int]
 ) -> list[TextSlot]:
-    tag_name = local_name(element.tag).lower()
-    skip = inherited_skip or tag_name in SKIP_TAGS
+    processed_nodes: set[tuple[int, str]] = set()
     slots: list[TextSlot] = []
-
-    if not skip and is_translatable_text(element.text or ""):
-        slots.append(make_slot(document, path, "text", element.text or "", counters))
-
-    for index, child in enumerate(list(element)):
-        child_path = [*path, index]
-        slots.extend(collect_text_slots(child, document, child_path, counters, skip))
-        if not skip and is_translatable_text(child.tail or ""):
-            slots.append(make_slot(document, child_path, "tail", child.tail or "", counters))
-
+    
+    leaf_blocks: list[tuple[ET.Element, list[int]]] = []
+    
+    def find_leaf_blocks(element: ET.Element, path: list[int]):
+        tag_name = local_name(element.tag).lower()
+        if tag_name in SKIP_TAGS:
+            return
+            
+        is_block = tag_name in BLOCK_TAGS
+        has_child_block = any(local_name(child.tag).lower() in BLOCK_TAGS for child in element.iter() if child is not element)
+        
+        if is_block and not has_child_block:
+            has_text = False
+            for el in element.iter():
+                if is_translatable_text(el.text or "") or (el is not element and is_translatable_text(el.tail or "")):
+                    has_text = True
+                    break
+            if has_text:
+                leaf_blocks.append((element, path))
+                return
+                
+        for index, child in enumerate(list(element)):
+            find_leaf_blocks(child, [*path, index])
+            
+    find_leaf_blocks(root, [])
+    
+    for block, path in leaf_blocks:
+        serialized, tags = serialize_block(block, processed_nodes)
+        counters["slot"] += 1
+        slot_id = f"t{counters['slot']:06d}"
+        slots.append(TextSlot(
+            slot_id=slot_id,
+            document=document,
+            path=path,
+            attribute="block",
+            source=serialized,
+            tags=tags
+        ))
+        
+    def collect_fallback(element: ET.Element, path: list[int], inherited_skip: bool = False):
+        tag_name = local_name(element.tag).lower()
+        skip = inherited_skip or tag_name in SKIP_TAGS
+        
+        if not skip:
+            node_key = (id(element), "text")
+            if node_key not in processed_nodes and is_translatable_text(element.text or ""):
+                counters["slot"] += 1
+                slot_id = f"t{counters['slot']:06d}"
+                slots.append(TextSlot(
+                    slot_id=slot_id,
+                    document=document,
+                    path=path,
+                    attribute="text",
+                    source=element.text or "",
+                    tags=[]
+                ))
+                
+        for index, child in enumerate(list(element)):
+            child_path = [*path, index]
+            collect_fallback(child, child_path, skip)
+            
+            if not skip:
+                node_key = (id(child), "tail")
+                if node_key not in processed_nodes and is_translatable_text(child.tail or ""):
+                    counters["slot"] += 1
+                    slot_id = f"t{counters['slot']:06d}"
+                    slots.append(TextSlot(
+                        slot_id=slot_id,
+                        document=document,
+                        path=child_path,
+                        attribute="tail",
+                        source=child.tail or "",
+                        tags=[]
+                    ))
+                    
+    collect_fallback(root, [])
     return slots
-
-
-def make_slot(
-    document: str,
-    path: list[int],
-    attribute: str,
-    source: str,
-    counters: dict[str, int],
-) -> TextSlot:
-    counters["slot"] += 1
-    slot_id = f"t{counters['slot']:06d}"
-    return TextSlot(slot_id, document, path, attribute, source)
 
 
 def batch_slots(slots: list[TextSlot], max_chars: int) -> Iterable[list[TextSlot]]:
@@ -219,7 +313,8 @@ def batch_slots(slots: list[TextSlot], max_chars: int) -> Iterable[list[TextSlot
     current_chars = 0
     for slot in slots:
         slot_len = len(slot.source)
-        if batch and current_chars + slot_len > max_chars:
+        # Limit by both character count and total items (max 20) per batch
+        if batch and (current_chars + slot_len > max_chars or len(batch) >= 20):
             yield batch
             batch = []
             current_chars = 0
@@ -267,7 +362,7 @@ def prepare_command(args: argparse.Namespace) -> None:
         except ET.ParseError as error:
             print(f"SKIP: {relative}: XML parse error: {error}", file=sys.stderr)
             continue
-        all_slots.extend(collect_text_slots(tree.getroot(), relative, [], counters))
+        all_slots.extend(collect_text_slots(tree.getroot(), relative, counters))
 
     manifest = {
         "input": str(args.input),
@@ -284,6 +379,7 @@ def prepare_command(args: argparse.Namespace) -> None:
                 "path": slot.path,
                 "attribute": slot.attribute,
                 "source": slot.source,
+                "tags": slot.tags,
             }
             for slot in all_slots
         ],
@@ -382,11 +478,43 @@ def apply_translations_to_document(
             if allow_missing:
                 continue
             fail(f"missing translation for {slot_id}")
+            
         element = get_element(root, slot["path"])
-        if slot["attribute"] == "text":
+        attribute = slot.get("attribute", "text")
+        
+        if attribute == "block":
+            tags = slot.get("tags", [])
+            translated_xml = translation
+            # Restore original tags in placeholders
+            for idx, tag in enumerate(tags):
+                translated_xml = translated_xml.replace(f"[t:{idx}]", tag)
+                
+            # Verify if there are any leftover placeholders that were not restored
+            leftover = re.findall(r"\[t:\d+\]", translated_xml)
+            if leftover:
+                print(f"ERROR: {slot_id} in {document}: Leftover placeholder tags {leftover} after restoration.", file=sys.stderr)
+                print(f"Original source: {slot['source']}", file=sys.stderr)
+                print(f"Translated text: {translation}", file=sys.stderr)
+                if not allow_missing:
+                    raise SystemExit(1)
+                
+            wrapper_xml = f'<root xmlns="{XHTML_NAMESPACE}">{translated_xml}</root>'
+            try:
+                temp_root = ET.fromstring(wrapper_xml)
+                element.text = temp_root.text
+                element[:] = list(temp_root)
+            except ET.ParseError as error:
+                print(f"ERROR: {slot_id} in {document}: XML parse error in translation: {error}", file=sys.stderr)
+                print(f"Original source: {slot['source']}", file=sys.stderr)
+                print(f"Translated text: {translation}", file=sys.stderr)
+                print(f"Restored XML: {translated_xml}", file=sys.stderr)
+                if not allow_missing:
+                    raise SystemExit(1)
+        elif attribute == "text":
             element.text = translation
         else:
             element.tail = translation
+            
         applied += 1
 
     tree.write(document_path, encoding="utf-8", xml_declaration=True)

@@ -66,13 +66,14 @@ python3 scripts/translate_epub.py build -w work/book-zh -o book.zh-Hans.epub
 
 1. 确认输入是 `.epub` 文件，并确定输出路径；默认建议 `<原文件名>.zh-Hans.epub`。
 2. 运行 `prepare`，生成 `manifest.json`、`chunks/`、`translated/` 和解包后的 `source/`。
-3. 按 chunk 翻译：
+3. **建立术语表**：在翻译前，先通读/扫描所有待翻译的文本内容，识别出书中的高频核心专业词汇、专有名词、主要人物姓名或特定短语，在工作目录下建立统一的术语对照表（如 `glossary.md`），确保后续翻译中术语的前后一致性。
+4. 按 chunk 翻译：
    - 小书可由主代理逐个处理 `chunks/*.jsonl`。
    - 大书可并行分配给子代理，每个子代理只处理若干 chunk。
    - 子代理产物必须写入 `translated/chunk-xxxx.jsonl`，不要改动 `source/`。
-4. 运行 `check`，确保所有 `id` 都有非空 `translation`。
-5. 运行 `build`，把译文写回 XHTML 并重打包为中文 EPUB。
-6. 抽查输出 EPUB：目录页、前言、第一章、含脚注章节、含图片章节。
+5. 运行 `check`，确保所有 `id` 都有非空 `translation`。
+6. 运行 `build`，把译文写回 XHTML 并重打包为中文 EPUB。
+7. 抽查输出 EPUB：目录页、前言、第一章、含脚注章节、含图片章节。
 
 ## 翻译原则
 
