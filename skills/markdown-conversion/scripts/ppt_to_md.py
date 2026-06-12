@@ -2,7 +2,7 @@
 """
 PowerPoint to Markdown Converter
 
-Extracts slide text, tables, speaker notes, and embedded pictures from
+Extracts slide text, hyperlinks, tables, speaker notes, and embedded pictures from
 Open XML PowerPoint files into Markdown.
 
 Primary use case: PPTX source decks -> Markdown for PPT generation input.
@@ -54,6 +54,27 @@ def normalize_text(value: str) -> str:
     return "\n".join(lines)
 
 
+def normalize_inline_text(value: str) -> str:
+    """Collapse run-level whitespace while preserving leading/trailing spaces."""
+    value = value.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    return re.sub(r"\s+", " ", value)
+
+
+def escape_markdown_link_text(value: str) -> str:
+    """Escape Markdown link label delimiters."""
+    return value.replace("\\", "\\\\").replace("[", r"\[").replace("]", r"\]")
+
+
+def escape_markdown_link_target(value: str) -> str:
+    """Escape Markdown inline-link target delimiters."""
+    return value.strip().replace(" ", "%20").replace(")", r"\)")
+
+
+def markdown_link(label: str, target: str) -> str:
+    """Return a Markdown inline link."""
+    return f"[{escape_markdown_link_text(label)}]({escape_markdown_link_target(target)})"
+
+
 def escape_table_cell(value: str) -> str:
     """Escape Markdown table syntax inside a cell."""
     return normalize_text(value).replace("|", r"\|") or " "
@@ -77,24 +98,64 @@ def iter_leaf_shapes(shapes: object) -> list[LeafShape]:
     return items
 
 
-def text_frame_to_markdown(text_frame: object) -> str:
+def hyperlink_address(item: object) -> str | None:
+    """Return an external hyperlink address for a run or shape, if present."""
+    try:
+        if hasattr(item, "click_action"):
+            address = item.click_action.hyperlink.address
+        else:
+            address = item.hyperlink.address
+    except Exception:
+        return None
+    if not address:
+        return None
+    return str(address).strip() or None
+
+
+def paragraph_to_markdown(paragraph: object, fallback_hyperlink: str | None = None) -> str:
+    """Convert one PowerPoint paragraph into Markdown text."""
+    segments = []
+    has_run_hyperlink = False
+
+    for run in getattr(paragraph, "runs", []):
+        text = normalize_inline_text(getattr(run, "text", ""))
+        if not text:
+            continue
+
+        address = hyperlink_address(run)
+        if address and text.strip():
+            leading = " " if text.startswith(" ") else ""
+            trailing = " " if text.endswith(" ") else ""
+            text = f"{leading}{markdown_link(text.strip(), address)}{trailing}"
+            has_run_hyperlink = True
+        segments.append(text)
+
+    text_md = re.sub(r"\s+", " ", "".join(segments)).strip()
+    if not text_md:
+        text_md = normalize_text(getattr(paragraph, "text", "")).replace("\n", " ")
+
+    if fallback_hyperlink and text_md and not has_run_hyperlink:
+        return markdown_link(text_md, fallback_hyperlink)
+    return text_md
+
+
+def text_frame_to_markdown(text_frame: object, fallback_hyperlink: str | None = None) -> str:
     """Convert a PowerPoint text frame into Markdown."""
     paragraphs = []
-    visible_paragraphs = [
-        paragraph for paragraph in text_frame.paragraphs
-        if normalize_text(paragraph.text)
-    ]
+    visible_paragraphs = []
+    for paragraph in text_frame.paragraphs:
+        text_md = paragraph_to_markdown(paragraph, fallback_hyperlink)
+        if text_md:
+            visible_paragraphs.append((paragraph, text_md))
+
     if not visible_paragraphs:
         return ""
 
-    list_like = any(paragraph.level > 0 for paragraph in visible_paragraphs)
+    list_like = any(paragraph.level > 0 for paragraph, _ in visible_paragraphs)
     if not list_like:
         list_like = len(visible_paragraphs) > 1
 
-    for paragraph in visible_paragraphs:
-        text = normalize_text(paragraph.text)
-        if not text:
-            continue
+    for paragraph, text in visible_paragraphs:
         if list_like:
             indent = "  " * max(paragraph.level, 0)
             paragraphs.append(f"{indent}- {text}")
@@ -110,7 +171,13 @@ def table_to_markdown(table: object) -> str:
     """Convert a PowerPoint table to a Markdown table."""
     rows = []
     for row in table.rows:
-        cells = [escape_table_cell(cell.text) for cell in row.cells]
+        cells = []
+        for cell in row.cells:
+            try:
+                cell_text = text_frame_to_markdown(cell.text_frame)
+            except Exception:
+                cell_text = getattr(cell, "text", "")
+            cells.append(escape_table_cell(cell_text.replace("\n", " ")))
         rows.append(cells)
 
     if not rows:
@@ -248,38 +315,60 @@ def convert_presentation_to_markdown(
         blocks = []
         for item in iter_leaf_shapes(slide.shapes):
             shape = item.shape
+            shape_link = hyperlink_address(shape)
 
             if getattr(shape, "has_table", False):
                 table_md = table_to_markdown(shape.table)
                 if table_md:
                     blocks.append(table_md)
+                if shape_link:
+                    blocks.append(f"> {markdown_link(getattr(shape, 'name', 'Table'), shape_link)}")
                 continue
 
             if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
                 if no_images:
+                    if shape_link:
+                        blocks.append(f"> {markdown_link(getattr(shape, 'name', 'Linked image'), shape_link)}")
                     continue
                 if filter_images and not _shape_passes_ai_filter(shape, slide_size, seen_image_hashes):
+                    if shape_link:
+                        blocks.append(f"> {markdown_link(getattr(shape, 'name', 'Filtered linked image'), shape_link)}")
                     continue
                 next_image_index = image_count + 1
                 asset_dir.mkdir(parents=True, exist_ok=True)
                 filename = save_picture(shape, asset_dir, slide_index, next_image_index)
                 if filename is None:
-                    blocks.append(f"> [Image] {getattr(shape, 'name', 'Picture')}")
+                    label = f"Image: {getattr(shape, 'name', 'Picture')}"
+                    blocks.append(
+                        f"> {markdown_link(label, shape_link)}"
+                        if shape_link
+                        else f"> [Image] {getattr(shape, 'name', 'Picture')}"
+                    )
                     continue
 
                 image_count = next_image_index
                 asset_dir_used = True
-                blocks.append(f"![Slide {slide_index} Image {image_count}]({asset_dir.name}/{filename})")
+                image_md = f"![Slide {slide_index} Image {image_count}]({asset_dir.name}/{filename})"
+                blocks.append(f"[{image_md}]({escape_markdown_link_target(shape_link)})" if shape_link else image_md)
                 continue
 
             if getattr(shape, "has_text_frame", False):
-                text_md = text_frame_to_markdown(shape.text_frame)
+                text_md = text_frame_to_markdown(shape.text_frame, fallback_hyperlink=shape_link)
                 if text_md:
                     blocks.append(text_md)
                 continue
 
             if getattr(shape, "has_chart", False):
-                blocks.append(f"> [Chart] {getattr(shape, 'name', 'Chart')}")
+                label = f"Chart: {getattr(shape, 'name', 'Chart')}"
+                blocks.append(
+                    f"> {markdown_link(label, shape_link)}"
+                    if shape_link
+                    else f"> [Chart] {getattr(shape, 'name', 'Chart')}"
+                )
+                continue
+
+            if shape_link:
+                blocks.append(f"> {markdown_link(getattr(shape, 'name', 'Linked shape'), shape_link)}")
 
         if blocks:
             lines.append("\n\n".join(blocks))
