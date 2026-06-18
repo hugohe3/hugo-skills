@@ -10,7 +10,7 @@
 
 | 技能 | 说明 |
 |---|---|
-| [coordinate-converter](skills/coordinate-converter/SKILL.md) | 在 WGS84 / GCJ02（高德） / BD09（百度）坐标系之间批量换算经纬度，支持单点或一系列坐标，输出 text / CSV / JSON |
+| [coordinate-converter](skills/coordinate-converter/SKILL.md) | 在 WGS84 / GCJ02（高德） / BD09（百度）坐标系之间批量换算经纬度，支持单点、坐标列表，以及 CSV / TSV / GeoJSON / GPX / KML 文件原格式转换 |
 | [epub-translator](skills/epub-translator/SKILL.md) | 使用当前 agent 模型将英文 EPUB 翻译为简体中文 EPUB，并保留目录、图片、样式和阅读顺序 |
 | [learning-master](skills/learning-master/SKILL.md) | 六阶段学习助手，用于系统化学习课程、书籍和文章，生成学习计划、笔记、Anki 卡片和外化产出 |
 | [markdown-conversion](skills/markdown-conversion/SKILL.md) | 将 PDF / Word / Excel / PowerPoint / EPUB / HTML / 字幕 / 网页 URL 转换为干净的 Markdown，供 LLM 读取 |
