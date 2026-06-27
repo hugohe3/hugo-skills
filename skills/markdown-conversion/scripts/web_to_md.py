@@ -26,6 +26,7 @@ TLS fingerprint handling:
 import argparse
 import datetime
 import io
+import json
 import os
 import re
 import sys
@@ -42,6 +43,7 @@ except ImportError:
 
 from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).parent))
+from _conversion_profile import write_source_profile  # noqa: E402
 from _image_filter import should_keep_image_bytes as _should_keep_image_bytes  # noqa: E402
 
 # Default: trafilatura provides production-grade main-content extraction.
@@ -221,16 +223,18 @@ def download_and_rewrite_images(
     image_dir: str,
     rel_prefix: str,
     filter_images: bool = False,
-) -> int:
+) -> tuple[int, list[dict]]:
     """Download images under the main content node and rewrite `src` paths."""
     if content_element is None:
-        return 0
+        return 0, []
     images = list(content_element.find_all("img"))
     if not images:
-        return 0
+        return 0, []
 
     os.makedirs(image_dir, exist_ok=True)
     downloaded = {}
+    image_sources: list[dict] = []
+    source_by_url: dict[str, dict] = {}
     saved = 0
     seen_hashes: set[str] = set()
     # Mutate the soup in place: decompose any <img> the ai filter rejects.
@@ -260,6 +264,7 @@ def download_and_rewrite_images(
         abs_url = urljoin(page_url, src)
         if abs_url in downloaded:
             saved_name = downloaded[abs_url]
+            source_entry = source_by_url.get(abs_url)
         else:
             try:
                 resp = _http_get(
@@ -274,6 +279,7 @@ def download_and_rewrite_images(
                     continue
                 filename = build_image_filename(
                     abs_url, idx, resp.headers.get("Content-Type"))
+                original_content_type = resp.headers.get("Content-Type", "").split(";")[0].strip()
 
                 # Check if image is webp and convert to png
                 stem, ext = os.path.splitext(filename)
@@ -331,6 +337,19 @@ def download_and_rewrite_images(
                         f.write(resp.content)
                 downloaded[abs_url] = filename
                 saved_name = filename
+                rel_saved_path = os.path.join(
+                    rel_prefix, saved_name) if rel_prefix else saved_name
+                source_entry = {
+                    "index": len(image_sources) + 1,
+                    "source_page_url": page_url,
+                    "download_url": abs_url,
+                    "local_path": rel_saved_path,
+                    "content_type": original_content_type,
+                    "license_status": "unknown",
+                    "occurrences": [],
+                }
+                image_sources.append(source_entry)
+                source_by_url[abs_url] = source_entry
                 saved += 1
             except Exception as e:
                 print(f"   [WARN] Skip image {abs_url}: {e}")
@@ -339,11 +358,18 @@ def download_and_rewrite_images(
         rel_path = os.path.join(
             rel_prefix, saved_name) if rel_prefix else saved_name
         img["src"] = rel_path
+        if source_entry is not None:
+            occurrences = source_entry.setdefault("occurrences", [])
+            occurrences.append({
+                "occurrence_index": len(occurrences) + 1,
+                "alt": img.get("alt", ""),
+                "source_ref": rel_path,
+            })
 
     for stale in to_decompose:
         stale.decompose()
 
-    return saved
+    return saved, image_sources
 
 
 def extract_metadata(soup: BeautifulSoup, url: str) -> dict[str, str]:
@@ -743,13 +769,14 @@ def process_url(url: str, output_file: str | None = None, no_images: bool = Fals
             if not raw and not _TRAFILATURA_AVAILABLE:
                 print("   [HINT] Install 'trafilatura' for cleaner main-content extraction: pip install trafilatura")
 
+        image_sources: list[dict] = []
         if no_images:
             if content_div is not None:
                 for img in content_div.find_all("img"):
                     img.decompose()
         else:
             # Download images and rewrite src before markdown conversion
-            image_count = download_and_rewrite_images(
+            image_count, image_sources = download_and_rewrite_images(
                 content_div, url, image_dir, rel_image_prefix, filter_images=filter_images)
             if image_count:
                 print(f"   [OK] Images: {image_count} saved to {image_dir}")
@@ -783,6 +810,31 @@ def process_url(url: str, output_file: str | None = None, no_images: bool = Fals
 
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(full_content)
+
+        if image_sources:
+            sources_path = os.path.join(image_dir, "image_sources.json")
+            with open(sources_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "schema": "markdown-conversion.image_sources.v1",
+                        "source_page_url": url,
+                        "items": image_sources,
+                    },
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                f.write("\n")
+            print(f"   [OK] Image sources: {sources_path}")
+
+        profile_path = write_source_profile(
+            input_path=url,
+            markdown_path=output_path,
+            converter="web_to_md.py",
+            conversion_type="web",
+            asset_dir=image_dir if os.path.exists(image_dir) else None,
+        )
+        print(f"   [OK] Source profile: {profile_path}")
 
         print(f"   [OK] Saved: {output_path}")
         return True, url, None

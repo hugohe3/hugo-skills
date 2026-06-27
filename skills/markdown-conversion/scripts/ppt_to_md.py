@@ -14,22 +14,28 @@ Dependency:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import quote
 
 from pptx import Presentation
+from pptx.enum.action import PP_ACTION
 from pptx.enum.shapes import MSO_SHAPE_TYPE
+from pptx.oxml.ns import qn
 
 sys.path.insert(0, str(Path(__file__).parent))
+from _conversion_profile import write_source_profile  # noqa: E402
 from _image_filter import should_keep_image as _should_keep_image  # noqa: E402
 from _image_filter import should_keep_image_bytes as _should_keep_image_bytes  # noqa: E402
 
 
 EMU_PER_INCH = 914400
+UNSUPPORTED_URL_SCHEMES = ("javascript:", "data:", "vbscript:", "file:")
 SUPPORTED_FORMATS = {
     ".pptx": "PowerPoint Presentation",
     ".pptm": "Macro-enabled PowerPoint Presentation",
@@ -55,6 +61,7 @@ class SavedImage:
 
     filename: str
     manifest_entry: dict[str, object]
+    is_new_asset: bool
 
 
 def normalize_text(value: str) -> str:
@@ -78,7 +85,7 @@ def escape_markdown_link_text(value: str) -> str:
 
 def escape_markdown_link_target(value: str) -> str:
     """Escape Markdown inline-link target delimiters."""
-    return value.strip().replace(" ", "%20").replace(")", r"\)")
+    return quote(value.strip(), safe="/:?=&%#@!$'*+,;")
 
 
 def markdown_link(label: str, target: str) -> str:
@@ -97,6 +104,18 @@ def safe_position(shape: object, attr: str) -> int:
         return int(getattr(shape, attr, 0) or 0)
     except Exception:
         return 0
+
+
+def supported_url(url: str | None) -> str | None:
+    """Return a safe URL for Markdown output, or None."""
+    if not url:
+        return None
+    value = str(url).strip()
+    if not value:
+        return None
+    if any(value.lower().startswith(scheme) for scheme in UNSUPPORTED_URL_SCHEMES):
+        return None
+    return value
 
 
 def iter_leaf_shapes(shapes: object) -> list[LeafShape]:
@@ -121,17 +140,49 @@ def hyperlink_address(item: object) -> str | None:
     """Return an external hyperlink address for a run or shape, if present."""
     try:
         if hasattr(item, "click_action"):
-            address = item.click_action.hyperlink.address
+            action = item.click_action
+            if action.action == PP_ACTION.NAMED_SLIDE:
+                target_slide = action.target_slide
+                if target_slide is not None:
+                    prs = item.part.slide.part.package.presentation_part.presentation
+                    return f"#slide-{list(prs.slides).index(target_slide) + 1}"
+            address = action.hyperlink.address
         else:
             address = item.hyperlink.address
     except Exception:
         return None
-    if not address:
+    return supported_url(address)
+
+
+def resolve_run_internal_jump(run: object, shape: object | None) -> str | None:
+    """Return #slide-N for a run-level slide jump, if present."""
+    if shape is None:
         return None
-    return str(address).strip() or None
+    r_id = ""
+    try:
+        rpr = run._r.find(qn("a:rPr"))
+        if rpr is None:
+            return None
+        hlink = rpr.find(qn("a:hlinkClick"))
+        if hlink is None or "hlinksldjump" not in (hlink.get("action", "") or ""):
+            return None
+        r_id = hlink.get(qn("r:id"), "")
+        if not r_id:
+            return None
+        target_slide = shape.part.related_part(r_id).slide
+        prs = shape.part.slide.part.package.presentation_part.presentation
+        return f"#slide-{list(prs.slides).index(target_slide) + 1}"
+    except Exception:
+        print(f"[WARN] ppt_to_md: could not resolve slide jump rId={r_id}", file=sys.stderr)
+        return None
 
 
-def paragraph_to_markdown(paragraph: object, fallback_hyperlink: str | None = None) -> str:
+def run_hyperlink(run: object, shape: object | None) -> str | None:
+    """Return a run's external or internal hyperlink target."""
+    return resolve_run_internal_jump(run, shape) or hyperlink_address(run)
+
+
+def paragraph_to_markdown(paragraph: object, fallback_hyperlink: str | None = None, shape: object | None = None) -> str:
     """Convert one PowerPoint paragraph into Markdown text."""
     segments = []
     has_run_hyperlink = False
@@ -141,7 +192,7 @@ def paragraph_to_markdown(paragraph: object, fallback_hyperlink: str | None = No
         if not text:
             continue
 
-        address = hyperlink_address(run)
+        address = run_hyperlink(run, shape)
         if address and text.strip():
             leading = " " if text.startswith(" ") else ""
             trailing = " " if text.endswith(" ") else ""
@@ -158,12 +209,12 @@ def paragraph_to_markdown(paragraph: object, fallback_hyperlink: str | None = No
     return text_md
 
 
-def text_frame_to_markdown(text_frame: object, fallback_hyperlink: str | None = None) -> str:
+def text_frame_to_markdown(text_frame: object, fallback_hyperlink: str | None = None, shape: object | None = None) -> str:
     """Convert a PowerPoint text frame into Markdown."""
     paragraphs = []
     visible_paragraphs = []
     for paragraph in text_frame.paragraphs:
-        text_md = paragraph_to_markdown(paragraph, fallback_hyperlink)
+        text_md = paragraph_to_markdown(paragraph, fallback_hyperlink, shape)
         if text_md:
             visible_paragraphs.append((paragraph, text_md))
 
@@ -343,21 +394,75 @@ def image_manifest_entry(
     }
 
 
-def save_picture(shape: object, asset_dir: Path, slide_index: int, image_index: int) -> SavedImage | None:
+def image_occurrence(shape: object, slide_index: int) -> dict[str, object]:
+    """Build one image occurrence row for the manifest."""
+    display_width = safe_position(shape, "width")
+    display_height = safe_position(shape, "height")
+    display_ratio = (
+        display_width / display_height
+        if display_width > 0 and display_height > 0
+        else None
+    )
+    return {
+        "slide_index": slide_index,
+        "shape_name": str(getattr(shape, "name", "")),
+        "display_left_emu": safe_position(shape, "left"),
+        "display_top_emu": safe_position(shape, "top"),
+        "display_width_emu": display_width,
+        "display_height_emu": display_height,
+        "display_width_in": round(display_width / EMU_PER_INCH, 4) if display_width else None,
+        "display_height_in": round(display_height / EMU_PER_INCH, 4) if display_height else None,
+        "display_ratio": round(display_ratio, 6) if display_ratio else None,
+    }
+
+
+def add_image_occurrence(entry: dict[str, object], occurrence: dict[str, object]) -> None:
+    """Append an image occurrence and refresh aggregate manifest fields."""
+    occurrences = entry.setdefault("occurrences", [])
+    if isinstance(occurrences, list):
+        occurrences.append(occurrence)
+        entry["usage_count"] = len(occurrences)
+
+
+def image_cache_key(image: object) -> str:
+    """Return a stable content hash for deduplicating image assets."""
+    return hashlib.sha256(bytes(getattr(image, "blob", b""))).hexdigest()
+
+
+def save_picture(
+    shape: object,
+    asset_dir: Path,
+    slide_index: int,
+    image_index: int,
+    asset_cache: dict[str, SavedImage],
+) -> SavedImage | None:
     """Persist a picture shape to the output asset directory."""
     try:
         image = shape.image
     except Exception:
         return None
 
+    cache_key = image_cache_key(image)
+    cached = asset_cache.get(cache_key)
+    if cached is not None:
+        add_image_occurrence(cached.manifest_entry, image_occurrence(shape, slide_index))
+        return SavedImage(
+            filename=cached.filename,
+            manifest_entry=cached.manifest_entry,
+            is_new_asset=False,
+        )
+
     ext = (image.ext or "png").lower()
     filename = f"slide_{slide_index:02d}_image_{image_index:02d}.{ext}"
     output_path = asset_dir / filename
     output_path.write_bytes(image.blob)
-    return SavedImage(
+    saved = SavedImage(
         filename=filename,
         manifest_entry=image_manifest_entry(shape, image, filename, slide_index, image_index),
+        is_new_asset=True,
     )
+    asset_cache[cache_key] = saved
+    return saved
 
 
 def _shape_passes_ai_filter(
@@ -402,7 +507,7 @@ def extract_notes(slide: object) -> str:
         shape = item.shape
         if not getattr(shape, "has_text_frame", False):
             continue
-        text = text_frame_to_markdown(shape.text_frame)
+        text = text_frame_to_markdown(shape.text_frame, shape=shape)
         if text:
             blocks.append(text)
 
@@ -449,8 +554,10 @@ def convert_presentation_to_markdown(
     ]
 
     image_count = 0
+    image_ref_count = 0
     asset_dir_used = False
     image_manifest: list[dict[str, object]] = []
+    asset_cache: dict[str, SavedImage] = {}
     slide_size = (
         int(getattr(presentation, "slide_width", 0) or 0),
         int(getattr(presentation, "slide_height", 0) or 0),
@@ -485,7 +592,7 @@ def convert_presentation_to_markdown(
                     continue
                 next_image_index = image_count + 1
                 asset_dir.mkdir(parents=True, exist_ok=True)
-                saved_image = save_picture(shape, asset_dir, slide_index, next_image_index)
+                saved_image = save_picture(shape, asset_dir, slide_index, next_image_index, asset_cache)
                 if saved_image is None:
                     label = f"Image: {getattr(shape, 'name', 'Picture')}"
                     blocks.append(
@@ -495,15 +602,17 @@ def convert_presentation_to_markdown(
                     )
                     continue
 
-                image_count = next_image_index
+                image_ref_count += 1
+                if saved_image.is_new_asset:
+                    image_count = next_image_index
+                    image_manifest.append(saved_image.manifest_entry)
                 asset_dir_used = True
-                image_manifest.append(saved_image.manifest_entry)
-                image_md = f"![Slide {slide_index} Image {image_count}]({asset_dir.name}/{saved_image.filename})"
+                image_md = f"![Slide {slide_index} Image {image_ref_count}]({asset_dir.name}/{saved_image.filename})"
                 blocks.append(f"[{image_md}]({escape_markdown_link_target(shape_link)})" if shape_link else image_md)
                 continue
 
             if getattr(shape, "has_text_frame", False):
-                text_md = text_frame_to_markdown(shape.text_frame, fallback_hyperlink=shape_link)
+                text_md = text_frame_to_markdown(shape.text_frame, fallback_hyperlink=shape_link, shape=shape)
                 if text_md:
                     blocks.append(text_md)
                 continue
@@ -546,6 +655,12 @@ def convert_presentation_to_markdown(
             json.dumps(image_manifest, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+    profile_path = write_source_profile(
+        input_path=str(input_file),
+        markdown_path=str(out_file),
+        converter="ppt_to_md.py",
+        conversion_type="pptx",
+    )
 
     print(f"[OK] Saved Markdown to: {out_file}")
     if asset_dir_used:
@@ -554,8 +669,14 @@ def convert_presentation_to_markdown(
             if path.is_file() and path.name != "image_manifest.json"
         ]
         print(f"   Extracted {len(media_files)} image file(s) -> {asset_dir}")
+        if image_ref_count != len(media_files):
+            print(
+                f"   Deduplicated {image_ref_count} image reference(s) "
+                f"into {len(media_files)} asset file(s)"
+            )
         if image_manifest:
             print(f"   Wrote image manifest -> {asset_dir / 'image_manifest.json'}")
+    print(f"   Wrote source profile -> {profile_path}")
 
     return markdown_content
 

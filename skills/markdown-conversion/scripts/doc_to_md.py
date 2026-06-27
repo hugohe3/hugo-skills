@@ -20,6 +20,7 @@ import argparse
 import base64
 import json
 import mimetypes
+import zipfile
 import re
 import shutil
 import subprocess
@@ -28,6 +29,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
+from _conversion_profile import write_source_profile  # noqa: E402
 from _image_filter import should_keep_image_bytes  # noqa: E402
 
 # ─────────────────────────────────────────────────────────────
@@ -198,6 +200,82 @@ def _report_result(out_file: Path, media_dir: Path | None) -> None:
                 print(f"   Wrote image manifest → {manifest}")
 
 
+def _write_profile(input_file: Path, out_file: Path, converter_type: str, media_dir: Path | None = None) -> None:
+    """Write source_profile.json beside a document conversion output."""
+    profile_path = write_source_profile(
+        input_path=str(input_file),
+        markdown_path=str(out_file),
+        converter="doc_to_md.py",
+        conversion_type=converter_type,
+        asset_dir=str(media_dir) if media_dir else None,
+    )
+    print(f"   Wrote source profile → {profile_path}")
+
+
+def _preserve_docx_office_vectors(input_file: Path, media_dir: Path, rel_media_dir: str, markdown: str) -> str:
+    """Extract DOCX EMF/WMF media parts and append references if absent."""
+    try:
+        with zipfile.ZipFile(input_file) as docx:
+            names = [
+                name for name in docx.namelist()
+                if Path(name).suffix.lower() in OFFICE_VECTOR_SUFFIXES
+                and name.startswith("word/media/")
+            ]
+            if not names:
+                return markdown
+
+            additions: list[str] = []
+            for index, name in enumerate(sorted(names), 1):
+                source_name = Path(name).name
+                target = media_dir / source_name
+                if target.exists():
+                    target = media_dir / f"office_vector_{index:03d}{Path(name).suffix.lower()}"
+                target.write_bytes(docx.read(name))
+                rel = f"{rel_media_dir}/{target.name}"
+                if rel not in markdown:
+                    additions.append(f"![Office vector {index}]({rel})")
+    except (OSError, zipfile.BadZipFile):
+        return markdown
+
+    if additions:
+        markdown = markdown.rstrip() + "\n\n## Extracted Office Vector Assets\n\n" + "\n\n".join(additions) + "\n"
+    return markdown
+
+
+def _append_docx_office_math(input_file: Path, markdown: str) -> str:
+    """Append a readable fallback for DOCX Office Math nodes."""
+    try:
+        from xml.etree import ElementTree as ET
+        with zipfile.ZipFile(input_file) as docx:
+            document_xml = docx.read("word/document.xml")
+    except (OSError, KeyError, zipfile.BadZipFile):
+        return markdown
+
+    try:
+        root = ET.fromstring(document_xml)
+    except ET.ParseError:
+        return markdown
+
+    formulas: list[str] = []
+    for math in root.iter():
+        if not math.tag.endswith("}oMath") and not math.tag.endswith("}oMathPara"):
+            continue
+        parts: list[str] = []
+        for node in math.iter():
+            if node.tag.endswith("}t") and node.text:
+                parts.append(node.text)
+        text = "".join(parts).strip()
+        if text and text not in formulas:
+            formulas.append(text)
+
+    if not formulas:
+        return markdown
+
+    lines = ["## Extracted Office Math", ""]
+    lines.extend(f"- `${formula}`" for formula in formulas)
+    return markdown.rstrip() + "\n\n" + "\n".join(lines) + "\n"
+
+
 # ─────────────────────────────────────────────────────────────
 # DOCX → Markdown (mammoth)
 # ─────────────────────────────────────────────────────────────
@@ -247,6 +325,9 @@ def _convert_docx(input_file: Path, out_file: Path, no_images: bool = False, fil
         markdown = _strip_image_refs(markdown) if no_images else re.sub(
             r'!\[[^\]]*\]\(\)\s*\n?', '', markdown
         )
+    if media_dir is not None:
+        markdown = _preserve_docx_office_vectors(input_file, media_dir, rel_media_dir, markdown)
+    markdown = _append_docx_office_math(input_file, markdown)
     out_file.write_text(markdown, encoding="utf-8")
     if media_dir is not None:
         _write_generic_image_manifest(media_dir, rel_media_dir, markdown, "docx_image")
@@ -260,6 +341,7 @@ def _convert_docx(input_file: Path, out_file: Path, no_images: bool = False, fil
             print(f"   [warn] {msg.message}")
 
     _report_result(out_file, media_dir)
+    _write_profile(input_file, out_file, "docx", media_dir)
     return markdown
 
 
@@ -412,6 +494,7 @@ def _convert_html(input_file: Path, out_file: Path, no_images: bool = False, fil
         media_dir = None
 
     _report_result(out_file, media_dir)
+    _write_profile(input_file, out_file, "html", media_dir)
     return markdown
 
 
@@ -605,6 +688,7 @@ def _convert_epub(input_file: Path, out_file: Path, no_images: bool = False, fil
         media_dir = None
 
     _report_result(out_file, media_dir)
+    _write_profile(input_file, out_file, "epub", media_dir)
     return markdown
 
 
@@ -693,6 +777,7 @@ def _convert_ipynb(input_file: Path, out_file: Path, no_images: bool = False, fi
         media_dir = out_file.parent / rel_media_dir
         _write_generic_image_manifest(media_dir, rel_media_dir, markdown, "ipynb_image")
     _report_result(out_file, media_dir if media_dir and media_dir.exists() else None)
+    _write_profile(input_file, out_file, "ipynb", media_dir if media_dir and media_dir.exists() else None)
     return markdown
 
 
@@ -788,6 +873,7 @@ def _convert_with_pandoc(input_file: Path, out_file: Path, suffix: str, no_image
         _write_generic_image_manifest(media_dir, rel_media_dir, markdown, "pandoc_image")
 
     _report_result(out_file, media_dir if (not no_images and media_dir.exists()) else None)
+    _write_profile(input_file, out_file, suffix.lstrip("."), media_dir if (not no_images and media_dir.exists()) else None)
     return markdown
 
 

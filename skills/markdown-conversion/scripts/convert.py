@@ -7,9 +7,13 @@ Supports: PDF, Word/EPUB/HTML, Excel, PowerPoint, web pages, and subtitles.
 """
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _conversion_profile import build_result_payload, write_source_profile  # noqa: E402
 
 
 SCRIPT_DIR = Path(__file__).parent
@@ -106,6 +110,28 @@ def print_output(path: str) -> None:
     print(f"OUTPUT: {Path(path).resolve()}")
 
 
+def write_profile(input_arg: str, output_path: str, converter: str, conv_type: str) -> Path:
+    """Write source_profile.json for one successful conversion."""
+    return write_source_profile(
+        input_path=input_arg,
+        markdown_path=output_path,
+        converter=converter,
+        conversion_type=conv_type,
+    )
+
+
+def print_json_result(input_arg: str, output_path: str, converter: str, conv_type: str, profile_path: Path | None) -> None:
+    """Print a machine-readable conversion result."""
+    payload = build_result_payload(
+        input_path=input_arg,
+        markdown_path=output_path,
+        converter=converter,
+        conversion_type=conv_type,
+        source_profile=str(profile_path) if profile_path else None,
+    )
+    print(json.dumps(payload, ensure_ascii=False))
+
+
 def mineru_local_paths(input_arg: str, output: str | None) -> tuple[list[str], Path, Path | None]:
     """Return MinerU output args, final Markdown path, and an optional generated path to rename."""
     input_path = Path(input_arg)
@@ -193,10 +219,15 @@ Examples:
         help="Faithful reproduction: disable all heuristic cleaning (header/footer dedup, heading detection, web main-content extraction, subtitle paragraph anchors)",
     )
     parser.add_argument("-o", "--output", help="Output path")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable conversion result after success",
+    )
     return parser.parse_known_args()
 
 
-def dispatch_single(input_arg: str, conv_type: str, output: str | None, use_mineru: bool, no_images: bool, filter_images: bool, raw: bool, unknown_args: list[str]) -> int:
+def dispatch_single(input_arg: str, conv_type: str, output: str | None, use_mineru: bool, no_images: bool, filter_images: bool, raw: bool, unknown_args: list[str], json_output: bool = False) -> int:
     """Dispatch one input (single file or URL) to the right converter. Returns exit code."""
     if conv_type == "sub":
         conv_type = "subtitle"
@@ -206,6 +237,9 @@ def dispatch_single(input_arg: str, conv_type: str, output: str | None, use_mine
     if conv_type == "markdown":
         print(f"[OK] Input is already Markdown: {input_arg}")
         print_output(input_arg)
+        profile_path = write_profile(input_arg, input_arg, "convert.py", "markdown")
+        if json_output:
+            print_json_result(input_arg, input_arg, "convert.py", "markdown", profile_path)
         return 0
 
     if conv_type == "text":
@@ -214,6 +248,9 @@ def dispatch_single(input_arg: str, conv_type: str, output: str | None, use_mine
         Path(out).write_text(src, encoding="utf-8")
         print(f"[OK] Plain text copied as Markdown: {out}")
         print_output(out)
+        profile_path = write_profile(input_arg, out, "convert.py", "text")
+        if json_output:
+            print_json_result(input_arg, out, "convert.py", "text", profile_path)
         return 0
 
     if conv_type == "pdf":
@@ -260,6 +297,9 @@ def dispatch_single(input_arg: str, conv_type: str, output: str | None, use_mine
             return rc
         if out and not (route_mineru and is_url):
             print_output(out)
+            profile_path = write_profile(input_arg, out, "pdf_to_md_mineru.py" if route_mineru else "pdf_to_md.py", "pdf")
+            if json_output:
+                print_json_result(input_arg, out, "pdf_to_md_mineru.py" if route_mineru else "pdf_to_md.py", "pdf", profile_path)
         return 0
 
     image_args: list[str] = []
@@ -277,6 +317,9 @@ def dispatch_single(input_arg: str, conv_type: str, output: str | None, use_mine
             return rc
         if out:
             print_output(out)
+            profile_path = write_profile(input_arg, out, "web_to_md.py", "web")
+            if json_output:
+                print_json_result(input_arg, out, "web_to_md.py", "web", profile_path)
         return 0
 
     if conv_type == "doc":
@@ -286,6 +329,9 @@ def dispatch_single(input_arg: str, conv_type: str, output: str | None, use_mine
         if rc != 0:
             return rc
         print_output(out)
+        profile_path = write_profile(input_arg, out, "doc_to_md.py", "doc")
+        if json_output:
+            print_json_result(input_arg, out, "doc_to_md.py", "doc", profile_path)
         return 0
 
     if conv_type == "excel":
@@ -295,6 +341,9 @@ def dispatch_single(input_arg: str, conv_type: str, output: str | None, use_mine
         if rc != 0:
             return rc
         print_output(out)
+        profile_path = write_profile(input_arg, out, "excel_to_md.py", "excel")
+        if json_output:
+            print_json_result(input_arg, out, "excel_to_md.py", "excel", profile_path)
         return 0
 
     if conv_type == "pptx":
@@ -304,6 +353,9 @@ def dispatch_single(input_arg: str, conv_type: str, output: str | None, use_mine
         if rc != 0:
             return rc
         print_output(out)
+        profile_path = write_profile(input_arg, out, "ppt_to_md.py", "pptx")
+        if json_output:
+            print_json_result(input_arg, out, "ppt_to_md.py", "pptx", profile_path)
         return 0
 
     if conv_type == "subtitle":
@@ -321,7 +373,7 @@ def dispatch_single(input_arg: str, conv_type: str, output: str | None, use_mine
     return 1
 
 
-def batch_directory(input_dir: str, output_dir: str | None, use_mineru: bool, no_images: bool, filter_images: bool, raw: bool, unknown_args: list[str]) -> tuple[int, Path]:
+def batch_directory(input_dir: str, output_dir: str | None, use_mineru: bool, no_images: bool, filter_images: bool, raw: bool, unknown_args: list[str], json_output: bool = False) -> tuple[int, Path]:
     """Convert every convertible file in a directory. Returns (failures, output_root)."""
     in_path = Path(input_dir)
     files = list_convertible_files(in_path)
@@ -345,7 +397,7 @@ def batch_directory(input_dir: str, output_dir: str | None, use_mineru: bool, no
             continue
         per_out = str(reserve_batch_output(f, out_root, used_outputs))
         print(f"  [{i}/{len(files)}] {f.name}")
-        rc = dispatch_single(str(f), per_type, per_out, use_mineru, no_images, filter_images, raw, unknown_args)
+        rc = dispatch_single(str(f), per_type, per_out, use_mineru, no_images, filter_images, raw, unknown_args, json_output=json_output)
         if rc == 0:
             succeeded += 1
         else:
@@ -370,10 +422,10 @@ def main() -> int:
         return 2
 
     if conv_type == "dir":
-        failures, _ = batch_directory(args.input, args.output, args.mineru, args.no_images, args.filter_images, args.raw, unknown_args)
+        failures, _ = batch_directory(args.input, args.output, args.mineru, args.no_images, args.filter_images, args.raw, unknown_args, json_output=args.json)
         return 0 if failures == 0 else 1
 
-    return dispatch_single(args.input, conv_type, args.output, args.mineru, args.no_images, args.filter_images, args.raw, unknown_args)
+    return dispatch_single(args.input, conv_type, args.output, args.mineru, args.no_images, args.filter_images, args.raw, unknown_args, json_output=args.json)
 
 
 if __name__ == "__main__":
