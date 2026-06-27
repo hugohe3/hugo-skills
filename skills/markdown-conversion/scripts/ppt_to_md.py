@@ -14,9 +14,11 @@ Dependency:
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 
 from pptx import Presentation
@@ -27,6 +29,7 @@ from _image_filter import should_keep_image as _should_keep_image  # noqa: E402
 from _image_filter import should_keep_image_bytes as _should_keep_image_bytes  # noqa: E402
 
 
+EMU_PER_INCH = 914400
 SUPPORTED_FORMATS = {
     ".pptx": "PowerPoint Presentation",
     ".pptm": "Macro-enabled PowerPoint Presentation",
@@ -44,6 +47,14 @@ class LeafShape:
     shape: object
     top: int
     left: int
+
+
+@dataclass
+class SavedImage:
+    """Extracted image asset plus manifest metadata."""
+
+    filename: str
+    manifest_entry: dict[str, object]
 
 
 def normalize_text(value: str) -> str:
@@ -80,6 +91,14 @@ def escape_table_cell(value: str) -> str:
     return normalize_text(value).replace("|", r"\|") or " "
 
 
+def safe_position(shape: object, attr: str) -> int:
+    """Read shape position safely, tolerating broken placeholder inheritance."""
+    try:
+        return int(getattr(shape, attr, 0) or 0)
+    except Exception:
+        return 0
+
+
 def iter_leaf_shapes(shapes: object) -> list[LeafShape]:
     """Return a flattened, reading-order list of shapes."""
     items: list[LeafShape] = []
@@ -90,8 +109,8 @@ def iter_leaf_shapes(shapes: object) -> list[LeafShape]:
         items.append(
             LeafShape(
                 shape=shape,
-                top=int(getattr(shape, "top", 0) or 0),
-                left=int(getattr(shape, "left", 0) or 0),
+                top=safe_position(shape, "top"),
+                left=safe_position(shape, "left"),
             )
         )
     items.sort(key=lambda item: (item.top, item.left))
@@ -198,7 +217,133 @@ def table_to_markdown(table: object) -> str:
     return "\n".join(lines)
 
 
-def save_picture(shape: object, asset_dir: Path, slide_index: int, image_index: int) -> str | None:
+def format_chart_value(value: object) -> str:
+    """Render a chart data point, trimming whole-number floats."""
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def chart_to_markdown(chart: object, name: str) -> str:
+    """Convert readable native PowerPoint chart data to Markdown."""
+    try:
+        chart_type = str(chart.chart_type)
+    except (ValueError, AttributeError):
+        chart_type = ""
+
+    categories: list[str] = []
+    try:
+        plots = list(chart.plots)
+        if plots:
+            categories = [
+                escape_table_cell(str(cat)) if cat is not None else ""
+                for cat in plots[0].categories
+            ]
+    except (ValueError, IndexError, AttributeError):
+        categories = []
+
+    series_data: list[tuple[str, list[object]]] = []
+    try:
+        for index, series in enumerate(chart.series, start=1):
+            try:
+                values = list(series.values)
+            except (ValueError, TypeError, AttributeError):
+                values = []
+            label = str(series.name) if getattr(series, "name", None) else f"Series {index}"
+            series_data.append((escape_table_cell(label), values))
+    except (ValueError, AttributeError):
+        series_data = []
+
+    header = f"> [Chart] {name}" + (f" - {chart_type}" if chart_type else "")
+    row_count = len(categories) if categories else max((len(v) for _, v in series_data), default=0)
+    if not series_data or row_count == 0:
+        return header
+
+    table_header = (["Category"] if categories else ["#"]) + [series_name for series_name, _ in series_data]
+    lines = [
+        header,
+        "",
+        "| " + " | ".join(table_header) + " |",
+        "| " + " | ".join(["---"] * len(table_header)) + " |",
+    ]
+    for row_index in range(row_count):
+        if categories:
+            label = categories[row_index] if row_index < len(categories) else ""
+        else:
+            label = str(row_index + 1)
+        cells = [label]
+        for _, values in series_data:
+            cells.append(format_chart_value(values[row_index]) if row_index < len(values) else "")
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
+def image_size_from_bytes(blob: bytes) -> tuple[int | None, int | None]:
+    """Return bitmap dimensions when Pillow can decode the bytes."""
+    try:
+        from PIL import Image
+        with Image.open(BytesIO(blob)) as image:
+            return image.width, image.height
+    except Exception:
+        return None, None
+
+
+def image_manifest_entry(
+    shape: object,
+    image: object,
+    filename: str,
+    slide_index: int,
+    image_index: int,
+) -> dict[str, object]:
+    """Build metadata for one extracted PowerPoint image."""
+    blob = bytes(getattr(image, "blob", b""))
+    pixel_width, pixel_height = image_size_from_bytes(blob)
+    pixel_ratio = (
+        pixel_width / pixel_height
+        if pixel_width and pixel_height
+        else None
+    )
+    display_width = safe_position(shape, "width")
+    display_height = safe_position(shape, "height")
+    display_ratio = (
+        display_width / display_height
+        if display_width > 0 and display_height > 0
+        else None
+    )
+    ext = (getattr(image, "ext", "") or Path(filename).suffix.lstrip(".") or "bin").lower()
+    asset_kind = "office_vector" if ext in {"emf", "wmf"} else "bitmap"
+    return {
+        "index": image_index,
+        "filename": filename,
+        "asset_kind": asset_kind,
+        "svg_renderable": asset_kind != "office_vector",
+        "pptx_native_supported": True,
+        "source_kind": "pptx_picture",
+        "source_ext": f".{ext}",
+        "content_type": str(getattr(image, "content_type", "")),
+        "pixel_width": pixel_width,
+        "pixel_height": pixel_height,
+        "pixel_ratio": round(pixel_ratio, 6) if pixel_ratio else None,
+        "usage_count": 1,
+        "occurrences": [
+            {
+                "slide_index": slide_index,
+                "shape_name": str(getattr(shape, "name", "")),
+                "display_left_emu": safe_position(shape, "left"),
+                "display_top_emu": safe_position(shape, "top"),
+                "display_width_emu": display_width,
+                "display_height_emu": display_height,
+                "display_width_in": round(display_width / EMU_PER_INCH, 4) if display_width else None,
+                "display_height_in": round(display_height / EMU_PER_INCH, 4) if display_height else None,
+                "display_ratio": round(display_ratio, 6) if display_ratio else None,
+            }
+        ],
+    }
+
+
+def save_picture(shape: object, asset_dir: Path, slide_index: int, image_index: int) -> SavedImage | None:
     """Persist a picture shape to the output asset directory."""
     try:
         image = shape.image
@@ -209,7 +354,10 @@ def save_picture(shape: object, asset_dir: Path, slide_index: int, image_index: 
     filename = f"slide_{slide_index:02d}_image_{image_index:02d}.{ext}"
     output_path = asset_dir / filename
     output_path.write_bytes(image.blob)
-    return filename
+    return SavedImage(
+        filename=filename,
+        manifest_entry=image_manifest_entry(shape, image, filename, slide_index, image_index),
+    )
 
 
 def _shape_passes_ai_filter(
@@ -302,6 +450,7 @@ def convert_presentation_to_markdown(
 
     image_count = 0
     asset_dir_used = False
+    image_manifest: list[dict[str, object]] = []
     slide_size = (
         int(getattr(presentation, "slide_width", 0) or 0),
         int(getattr(presentation, "slide_height", 0) or 0),
@@ -336,8 +485,8 @@ def convert_presentation_to_markdown(
                     continue
                 next_image_index = image_count + 1
                 asset_dir.mkdir(parents=True, exist_ok=True)
-                filename = save_picture(shape, asset_dir, slide_index, next_image_index)
-                if filename is None:
+                saved_image = save_picture(shape, asset_dir, slide_index, next_image_index)
+                if saved_image is None:
                     label = f"Image: {getattr(shape, 'name', 'Picture')}"
                     blocks.append(
                         f"> {markdown_link(label, shape_link)}"
@@ -348,7 +497,8 @@ def convert_presentation_to_markdown(
 
                 image_count = next_image_index
                 asset_dir_used = True
-                image_md = f"![Slide {slide_index} Image {image_count}]({asset_dir.name}/{filename})"
+                image_manifest.append(saved_image.manifest_entry)
+                image_md = f"![Slide {slide_index} Image {image_count}]({asset_dir.name}/{saved_image.filename})"
                 blocks.append(f"[{image_md}]({escape_markdown_link_target(shape_link)})" if shape_link else image_md)
                 continue
 
@@ -359,12 +509,17 @@ def convert_presentation_to_markdown(
                 continue
 
             if getattr(shape, "has_chart", False):
-                label = f"Chart: {getattr(shape, 'name', 'Chart')}"
-                blocks.append(
-                    f"> {markdown_link(label, shape_link)}"
-                    if shape_link
-                    else f"> [Chart] {getattr(shape, 'name', 'Chart')}"
-                )
+                chart_name = getattr(shape, "name", "Chart")
+                try:
+                    chart_md = chart_to_markdown(shape.chart, chart_name)
+                except (ValueError, AttributeError, KeyError):
+                    label = f"Chart: {chart_name}"
+                    chart_md = (
+                        f"> {markdown_link(label, shape_link)}"
+                        if shape_link
+                        else f"> [Chart] {chart_name}"
+                    )
+                blocks.append(chart_md)
                 continue
 
             if shape_link:
@@ -386,11 +541,21 @@ def convert_presentation_to_markdown(
 
     markdown_content = "\n".join(lines).strip() + "\n"
     out_file.write_text(markdown_content, encoding="utf-8")
+    if image_manifest:
+        (asset_dir / "image_manifest.json").write_text(
+            json.dumps(image_manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
     print(f"[OK] Saved Markdown to: {out_file}")
     if asset_dir_used:
-        media_files = [path for path in asset_dir.iterdir() if path.is_file()]
+        media_files = [
+            path for path in asset_dir.iterdir()
+            if path.is_file() and path.name != "image_manifest.json"
+        ]
         print(f"   Extracted {len(media_files)} image file(s) -> {asset_dir}")
+        if image_manifest:
+            print(f"   Wrote image manifest -> {asset_dir / 'image_manifest.json'}")
 
     return markdown_content
 

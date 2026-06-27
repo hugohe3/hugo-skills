@@ -18,6 +18,7 @@ All paths produce the same output convention:
 
 import argparse
 import base64
+import json
 import mimetypes
 import re
 import shutil
@@ -50,6 +51,8 @@ PANDOC_FORMATS = {
 
 # Formats pandoc should extract embedded media from
 PANDOC_MEDIA_FORMATS = {".odt"}
+IMAGE_MANIFEST_NAME = "image_manifest.json"
+OFFICE_VECTOR_SUFFIXES = {".emf", ".wmf"}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -108,13 +111,91 @@ def _strip_image_refs(markdown: str) -> str:
     return re.sub(r'\n{3,}', '\n\n', "\n".join(out))
 
 
+def _image_size(path: Path) -> tuple[int | None, int | None]:
+    """Return bitmap dimensions when Pillow can read the file."""
+    try:
+        from PIL import Image
+        with Image.open(path) as image:
+            return image.width, image.height
+    except Exception:
+        return None, None
+
+
+def _write_generic_image_manifest(
+    media_dir: Path | None,
+    rel_media_dir: str,
+    markdown: str,
+    source_kind: str,
+) -> bool:
+    """Write image metadata for extracted document assets."""
+    if media_dir is None or not media_dir.exists():
+        return False
+
+    asset_files = [
+        path for path in sorted(media_dir.rglob("*"))
+        if path.is_file() and path.name != IMAGE_MANIFEST_NAME
+    ]
+    if not asset_files:
+        return False
+
+    ref_pattern = re.compile(rf"{re.escape(rel_media_dir)}/([^)\s>]+)")
+    occurrence_map: dict[str, list[dict[str, object]]] = {}
+    for occurrence_index, match in enumerate(ref_pattern.finditer(markdown), 1):
+        filename = Path(unquote(match.group(1))).name
+        occurrence_map.setdefault(filename, []).append({
+            "occurrence_index": occurrence_index,
+            "source_ref": f"{rel_media_dir}/{match.group(1)}",
+        })
+
+    manifest: list[dict[str, object]] = []
+    for path in asset_files:
+        ext = path.suffix.lower() or ".bin"
+        pixel_width, pixel_height = _image_size(path)
+        pixel_ratio = (
+            pixel_width / pixel_height
+            if pixel_width and pixel_height
+            else None
+        )
+        asset_kind = "office_vector" if ext in OFFICE_VECTOR_SUFFIXES else "bitmap"
+        occurrences = occurrence_map.get(path.name, [])
+        manifest.append({
+            "index": len(manifest) + 1,
+            "filename": path.relative_to(media_dir).as_posix(),
+            "asset_kind": asset_kind,
+            "svg_renderable": asset_kind != "office_vector",
+            "pptx_native_supported": True,
+            "source_kind": source_kind,
+            "source_ext": ext,
+            "pixel_width": pixel_width,
+            "pixel_height": pixel_height,
+            "pixel_ratio": round(pixel_ratio, 6) if pixel_ratio else None,
+            "usage_count": len(occurrences) if occurrences else 1,
+            "occurrences": occurrences,
+        })
+
+    if not manifest:
+        return False
+
+    (media_dir / IMAGE_MANIFEST_NAME).write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return True
+
+
 def _report_result(out_file: Path, media_dir: Path | None) -> None:
     size = out_file.stat().st_size
     print(f"[OK] Saved Markdown to: {out_file} ({_format_size(size)})")
     if media_dir and media_dir.exists():
-        files = [f for f in media_dir.rglob("*") if f.is_file()]
+        files = [
+            f for f in media_dir.rglob("*")
+            if f.is_file() and f.name != IMAGE_MANIFEST_NAME
+        ]
         if files:
             print(f"   Extracted {len(files)} media file(s) → {media_dir}")
+            manifest = media_dir / IMAGE_MANIFEST_NAME
+            if manifest.exists():
+                print(f"   Wrote image manifest → {manifest}")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -167,6 +248,8 @@ def _convert_docx(input_file: Path, out_file: Path, no_images: bool = False, fil
             r'!\[[^\]]*\]\(\)\s*\n?', '', markdown
         )
     out_file.write_text(markdown, encoding="utf-8")
+    if media_dir is not None:
+        _write_generic_image_manifest(media_dir, rel_media_dir, markdown, "docx_image")
 
     if media_dir is not None and not any(media_dir.iterdir()):
         media_dir.rmdir()
@@ -321,6 +404,8 @@ def _convert_html(input_file: Path, out_file: Path, no_images: bool = False, fil
     # Collapse 3+ blank lines to 2 for tidier output
     markdown = re.sub(r"\n{3,}", "\n\n", markdown).strip() + "\n"
     out_file.write_text(markdown, encoding="utf-8")
+    if media_dir is not None:
+        _write_generic_image_manifest(media_dir, rel_media_dir, markdown, "html_image")
 
     if media_dir is not None and not any(media_dir.iterdir()):
         media_dir.rmdir()
@@ -512,6 +597,8 @@ def _convert_epub(input_file: Path, out_file: Path, no_images: bool = False, fil
     markdown = markdownify(combined_html, heading_style="ATX", bullets="-")
     markdown = re.sub(r"\n{3,}", "\n\n", markdown).strip() + "\n"
     out_file.write_text(markdown, encoding="utf-8")
+    if media_dir is not None:
+        _write_generic_image_manifest(media_dir, rel_media_dir, markdown, "epub_image")
 
     if media_dir is not None and not any(media_dir.iterdir()):
         media_dir.rmdir()
@@ -604,6 +691,7 @@ def _convert_ipynb(input_file: Path, out_file: Path, no_images: bool = False, fi
         media_dir = None
     else:
         media_dir = out_file.parent / rel_media_dir
+        _write_generic_image_manifest(media_dir, rel_media_dir, markdown, "ipynb_image")
     _report_result(out_file, media_dir if media_dir and media_dir.exists() else None)
     return markdown
 
@@ -696,6 +784,8 @@ def _convert_with_pandoc(input_file: Path, out_file: Path, suffix: str, no_image
         if not any(media_dir.iterdir()):
             media_dir.rmdir()
     out_file.write_text(markdown, encoding="utf-8")
+    if not no_images and media_dir.exists():
+        _write_generic_image_manifest(media_dir, rel_media_dir, markdown, "pandoc_image")
 
     _report_result(out_file, media_dir if (not no_images and media_dir.exists()) else None)
     return markdown
