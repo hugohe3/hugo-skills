@@ -12,6 +12,7 @@
 |---|---|
 | [coordinate-converter](skills/coordinate-converter/SKILL.md) | 在 WGS84 / GCJ02（高德） / BD09（百度）坐标系之间批量换算经纬度，支持单点、坐标列表，以及 CSV / TSV / GeoJSON / GPX / KML 文件原格式转换 |
 | [epub-translator](skills/epub-translator/SKILL.md) | 使用当前 agent 模型将英文 EPUB 翻译为简体中文 EPUB，并保留目录、图片、样式和阅读顺序 |
+| [image-local-replacer](skills/image-local-replacer/SKILL.md) | 对 PNG/JPG/WebP 位图做小范围局部覆盖、修补或文字重写，保持原图尺寸和未选中区域不变 |
 | [learning-master](skills/learning-master/SKILL.md) | 六阶段学习助手，用于系统化学习课程、书籍和文章，生成学习计划、笔记、Anki 卡片和外化产出 |
 | [markdown-conversion](skills/markdown-conversion/SKILL.md) | 将 PDF / Word / Excel / PowerPoint / EPUB / HTML / 字幕 / 网页 URL 转换为干净的 Markdown，供 LLM 读取 |
 
@@ -39,9 +40,12 @@ pip install -r skills/learning-master/resources/requirements.txt
 # markdown-conversion：文档转换
 pip install -r skills/markdown-conversion/resources/requirements.txt
 
+# image-local-replacer：图片局部替换
+pip install -r skills/image-local-replacer/resources/requirements.txt
+
 ```
 
-如果只使用不依赖脚本的纯文本流程，可以不安装 Python 依赖；一旦需要运行转换器或 Anki 导出脚本，就需要安装对应技能的 `requirements.txt`。
+如果只使用不依赖脚本的纯文本流程，可以不安装 Python 依赖；一旦需要运行转换器、Anki 导出或图片局部替换脚本，就需要安装对应技能的 `requirements.txt`。
 
 `epub-translator` 的脚本只使用 Python 标准库，不需要安装第三方依赖。
 
@@ -78,6 +82,7 @@ Claude Code 内也可以使用：
 /path/to/hugo-skills/skills/markdown-conversion/SKILL.md
 /path/to/hugo-skills/skills/learning-master/SKILL.md
 /path/to/hugo-skills/skills/epub-translator/SKILL.md
+/path/to/hugo-skills/skills/image-local-replacer/SKILL.md
 ```
 
 ### Claude Code 手动配置
@@ -98,6 +103,10 @@ Claude Code 内也可以使用：
     {
       "type": "file",
       "path": "/path/to/hugo-skills/skills/epub-translator/SKILL.md"
+    },
+    {
+      "type": "file",
+      "path": "/path/to/hugo-skills/skills/image-local-replacer/SKILL.md"
     }
   ]
 }
@@ -109,9 +118,10 @@ Claude Code 内也可以使用：
 claude skills add /path/to/hugo-skills/skills/markdown-conversion/SKILL.md
 claude skills add /path/to/hugo-skills/skills/learning-master/SKILL.md
 claude skills add /path/to/hugo-skills/skills/epub-translator/SKILL.md
+claude skills add /path/to/hugo-skills/skills/image-local-replacer/SKILL.md
 ```
 
-添加后，支持 skills 的 agent 会在你要求转换文档或管理系统化学习项目时自动调用相应技能。
+添加后，支持 skills 的 agent 会在你要求转换文档、管理系统化学习项目或处理图片局部替换时自动调用相应技能。
 
 ## 仓库结构
 
@@ -129,6 +139,10 @@ skills/
   epub-translator/
     SKILL.md              # 技能入口——agent 读取此文件
     scripts/              # EPUB 拆分与重打包脚本
+  image-local-replacer/
+    SKILL.md              # 技能入口——agent 读取此文件
+    scripts/              # 位图局部替换脚本
+    resources/            # requirements.txt
 ```
 
 ## 贡献

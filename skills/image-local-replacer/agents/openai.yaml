@@ -1,0 +1,3 @@
+interface:
+  display_name: "图片局部替换"
+  short_description: "局部覆盖、修补或重写位图小区域"

@@ -1,0 +1,6 @@
+# Image Label Replacer — dependencies
+#
+# Install:
+#     pip install -r resources/requirements.txt
+
+pillow>=10,<12
