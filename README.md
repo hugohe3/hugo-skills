@@ -15,6 +15,7 @@
 | [image-local-replacer](skills/image-local-replacer/SKILL.md) | 对 PNG/JPG/WebP 位图做小范围局部覆盖、修补或文字重写，保持原图尺寸和未选中区域不变 |
 | [learning-master](skills/learning-master/SKILL.md) | 六阶段学习助手，用于系统化学习课程、书籍和文章，生成学习计划、笔记、Anki 卡片和外化产出 |
 | [markdown-conversion](skills/markdown-conversion/SKILL.md) | 将 PDF / Word / Excel / PowerPoint / EPUB / HTML / 字幕 / 网页 URL 转换为干净的 Markdown，供 LLM 读取 |
+| [structured-problem-solving](skills/structured-problem-solving/SKILL.md) | 用麦肯锡七步问题解决法分析复杂问题，通过明确问题、MECE 拆解、优先排序、工作计划、分析论证、综合建议和方案呈现形成解决路径 |
 
 ## 安装
 
@@ -83,6 +84,7 @@ Claude Code 内也可以使用：
 /path/to/hugo-skills/skills/learning-master/SKILL.md
 /path/to/hugo-skills/skills/epub-translator/SKILL.md
 /path/to/hugo-skills/skills/image-local-replacer/SKILL.md
+/path/to/hugo-skills/skills/structured-problem-solving/SKILL.md
 ```
 
 ### Claude Code 手动配置
@@ -107,6 +109,10 @@ Claude Code 内也可以使用：
     {
       "type": "file",
       "path": "/path/to/hugo-skills/skills/image-local-replacer/SKILL.md"
+    },
+    {
+      "type": "file",
+      "path": "/path/to/hugo-skills/skills/structured-problem-solving/SKILL.md"
     }
   ]
 }
@@ -119,9 +125,10 @@ claude skills add /path/to/hugo-skills/skills/markdown-conversion/SKILL.md
 claude skills add /path/to/hugo-skills/skills/learning-master/SKILL.md
 claude skills add /path/to/hugo-skills/skills/epub-translator/SKILL.md
 claude skills add /path/to/hugo-skills/skills/image-local-replacer/SKILL.md
+claude skills add /path/to/hugo-skills/skills/structured-problem-solving/SKILL.md
 ```
 
-添加后，支持 skills 的 agent 会在你要求转换文档、管理系统化学习项目或处理图片局部替换时自动调用相应技能。
+添加后，支持 skills 的 agent 会在你要求转换文档、管理系统化学习项目、处理图片局部替换或结构化分析问题时自动调用相应技能。
 
 ## 仓库结构
 
@@ -143,6 +150,9 @@ skills/
     SKILL.md              # 技能入口——agent 读取此文件
     scripts/              # 位图局部替换脚本
     resources/            # requirements.txt
+  structured-problem-solving/
+    SKILL.md              # 技能入口——agent 读取此文件
+    agents/               # UI 元数据
 ```
 
 ## 贡献

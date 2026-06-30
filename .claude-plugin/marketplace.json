@@ -7,13 +7,13 @@
     "url": "https://github.com/hugohe3"
   },
   "metadata": {
-    "description": "Hugo's portable AI skills for document conversion, agent-native EPUB translation, and structured learning workflows"
+    "description": "Hugo's portable AI skills for document conversion, agent-native EPUB translation, structured problem solving, and structured learning workflows"
   },
   "plugins": [
     {
       "name": "hugo-skills",
       "source": "./",
-      "description": "Portable AI skills for Markdown document conversion, agent-native EPUB translation, and six-stage structured learning workflows. Note: this plugin ships only the skill files; install each skill's Python dependencies from the installed location before running scripts.",
+      "description": "Portable AI skills for Markdown document conversion, agent-native EPUB translation, structured problem solving, and six-stage structured learning workflows. Note: this plugin ships only the skill files; install each skill's Python dependencies from the installed location before running scripts.",
       "author": {
         "name": "Hugo He",
         "email": "heyug3@gmail.com",
@@ -29,6 +29,7 @@
         "document-conversion",
         "epub",
         "translation",
+        "structured-problem-solving",
         "learning",
         "anki"
       ],
@@ -36,7 +37,8 @@
       "skills": [
         "./skills/epub-translator",
         "./skills/learning-master",
-        "./skills/markdown-conversion"
+        "./skills/markdown-conversion",
+        "./skills/structured-problem-solving"
       ]
     }
   ]
