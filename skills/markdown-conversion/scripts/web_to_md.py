@@ -718,7 +718,7 @@ def simple_html_to_markdown_traversal(soup: Tag | BeautifulSoup | None) -> str:
     return md or ""
 
 
-def process_url(url: str, output_file: str | None = None, no_images: bool = False, filter_images: bool = False, raw: bool = False) -> tuple[bool, str, str | None]:
+def process_url(url: str, output_file: str | None = None, no_images: bool = False, filter_images: bool = False, raw: bool = False) -> tuple[bool, str, str | None, str | None]:
     """Fetch, convert, and save one web page as Markdown."""
     print(f"\n[Fetching] {url}")
     try:
@@ -834,14 +834,14 @@ def process_url(url: str, output_file: str | None = None, no_images: bool = Fals
             conversion_type="web",
             asset_dir=image_dir if os.path.exists(image_dir) else None,
         )
-        print(f"   [OK] Source profile: {profile_path}")
+        print(f"   [OK] Conversion profile: {profile_path}")
 
         print(f"   [OK] Saved: {output_path}")
-        return True, url, None
+        return True, url, None, output_path
 
     except Exception as e:
         print(f"   [ERROR] {str(e)}")
-        return False, url, str(e)
+        return False, url, str(e), None
 
 
 def main() -> None:
@@ -867,6 +867,10 @@ def main() -> None:
         "--raw",
         action="store_true",
         help="Faithful reproduction: disable trafilatura main-content extraction (keeps more boilerplate)",
+    )
+    parser.add_argument(
+        "--emit-result",
+        help="Write a JSON result with the actual Markdown output path",
     )
 
     args = parser.parse_args()
@@ -899,8 +903,37 @@ def main() -> None:
     for i, url in enumerate(targets):
         # Allow specific output file only if 1 URL
         out = args.output if (len(targets) == 1 and args.output) else None
-        success, url, err = process_url(url, out, no_images=args.no_images, filter_images=args.filter_images, raw=args.raw)
-        results.append((success, url, err))
+        success, url, err, markdown_path = process_url(
+            url,
+            out,
+            no_images=args.no_images,
+            filter_images=args.filter_images,
+            raw=args.raw,
+        )
+        results.append((success, url, err, markdown_path))
+
+    if args.emit_result:
+        emitted = {
+            "schema": "markdown-conversion.web_result.v1",
+            "results": [
+                {
+                    "success": success,
+                    "url": url,
+                    "error": err or "",
+                    "markdown": markdown_path or "",
+                }
+                for success, url, err, markdown_path in results
+            ],
+        }
+        successful_paths = [
+            markdown_path for success, _url, _err, markdown_path in results
+            if success and markdown_path
+        ]
+        if len(successful_paths) == 1:
+            emitted["markdown"] = successful_paths[0]
+        with open(args.emit_result, "w", encoding="utf-8") as f:
+            json.dump(emitted, f, ensure_ascii=False, indent=2)
+            f.write("\n")
 
     # Summary
     success_count = sum(1 for r in results if r[0])
@@ -915,6 +948,7 @@ def main() -> None:
         for r in results:
             if not r[0]:
                 print(f"   - {r[1]}: {r[2]}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ description: >
 | 主 Markdown | 每个输入生成一个 `.md`；标题、段落、列表、表格和链接优先保持可读、可引用 |
 | 资产目录 | 图片等伴随资源放在同级 `<stem>_files/`，Markdown 中只使用相对路径 |
 | 图片 manifest | 能提供结构化图片信息的转换器会在 `<stem>_files/image_manifest.json` 写入图片元数据；包含来源类型、尺寸、使用次数、页面 / 幻灯片出现位置等 |
-| 来源 profile | 成功转换后写入 `source_profile.json`，记录原始文件、Markdown、资产目录、manifest、标题 / 表格 / 图片 / 链接计数和转换器信息 |
+| 转换 profile | 成功转换后写入 `<stem>.conversion_profile.json`，记录原始文件、Markdown、资产目录、manifest、标题 / 表格 / 图片 / 链接计数和转换器信息；批量转换时每个 Markdown 有独立 sidecar，避免互相覆盖 |
 | 网页图片来源 | `web_to_md.py` 下载网页图片时写入 `<stem>_files/image_sources.json`；图片授权状态默认 `unknown`，交付前需审查 |
 | 表格数据 | Excel、PPT 表格、可读图表数据统一转为 Markdown 表，避免数据只停留在图片或占位符里 |
 | 链接 | 外部链接尽量保留为 Markdown 链接；不安全或不可解析链接会降级为纯文本 / 占位说明 |
@@ -51,14 +51,14 @@ description: >
 
 ## 快速开始
 
-统一调度器会自动识别输入类型：
+统一调度器会自动识别输入类型，可一次传入一个或多个文件 / URL / 目录：
 
 ```bash
-python3 scripts/convert.py <文件或URL>
+python3 scripts/convert.py <文件或URL> [<文件或URL> ...]
 ```
 
 默认输出：`<输入目录>/<文件名>.md`。
-本地文件可用 `-o <output.md>` 指定输出路径；目录输入时，`-o` 为输出目录。
+本地单文件可用 `-o <output.md>` 指定输出路径；多输入或目录输入时，`-o` 为输出目录。
 调度器成功后会打印 `OUTPUT: /绝对路径/output.md`。
 
 ```bash
@@ -70,6 +70,7 @@ python3 scripts/convert.py data.xlsx                       # Excel
 python3 scripts/convert.py deck.pptx                       # PowerPoint
 python3 scripts/convert.py book.epub                       # EPUB
 python3 scripts/convert.py https://example.com/post        # 网页（trafilatura 正文识别）
+python3 scripts/convert.py paper.pdf report.docx deck.pptx # 多来源批量
 python3 scripts/convert.py ./course_dir -t sub             # 字幕批量（含段落锚点）
 python3 scripts/convert.py ./mixed_docs                    # 目录批量
 python3 scripts/convert.py report.docx --json              # 额外打印机器可读 JSON 结果
@@ -149,7 +150,7 @@ python3 scripts/subtitle_to_md.py lecture.srt                 # 默认段落 + B
 python3 scripts/subtitle_to_md.py lecture.srt --raw           # 单行拼接（旧行为）
 ```
 
-每个脚本输出 `<输入>.md` 及嵌入图片的 `<输入>_files/`，Markdown 中使用相对路径引用。支持图片 manifest 的后端会额外写入 `<输入>_files/image_manifest.json`，用于下游判断图片尺寸、来源和出现位置。成功转换会写入 `source_profile.json`；统一调度器还支持 `--json` 打印机器可读结果。
+每个脚本输出 `<输入>.md` 及嵌入图片的 `<输入>_files/`，Markdown 中使用相对路径引用。支持图片 manifest 的后端会额外写入 `<输入>_files/image_manifest.json`，用于下游判断图片尺寸、来源和出现位置。成功转换会写入 `<stem>.conversion_profile.json`；统一调度器还支持 `--json` 打印机器可读结果。
 所有图片相关后端都支持 `--no-images` 和 `--filter-images`（互斥）；启发式清理可用 `--raw` 关闭。
 
 ## 选择 PDF 后端
@@ -204,6 +205,6 @@ python3 scripts/check_env.py
 - 嵌入图片 → `<输入目录>/<文件名>_files/`，Markdown 中使用相对路径引用
 - 图片 manifest → `<输入目录>/<文件名>_files/image_manifest.json`（后端支持且存在图片时生成）
 - 网页图片来源 → `<输入目录>/<文件名>_files/image_sources.json`（网页后端下载图片时生成，授权状态默认 `unknown`）
-- 来源 profile → `source_profile.json`（记录本次转换产物和结构统计）
+- 转换 profile → `<stem>.conversion_profile.json`（记录本次转换产物和结构统计）
 - URL → 当前工作目录（除非指定 `-o`）；经 MinerU 处理的 PDF URL 使用 MinerU 的输出目录行为
 - 已是 Markdown / 纯文本的输入直接输出（或复制）不做转换

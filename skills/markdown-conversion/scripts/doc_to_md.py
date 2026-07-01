@@ -523,7 +523,7 @@ def _report_result(out_file: Path, media_dir: Path | None) -> None:
 
 
 def _write_profile(input_file: Path, out_file: Path, converter_type: str, media_dir: Path | None = None) -> None:
-    """Write source_profile.json beside a document conversion output."""
+    """Write a conversion profile beside a document conversion output."""
     profile_path = write_source_profile(
         input_path=str(input_file),
         markdown_path=str(out_file),
@@ -531,7 +531,7 @@ def _write_profile(input_file: Path, out_file: Path, converter_type: str, media_
         conversion_type=converter_type,
         asset_dir=str(media_dir) if media_dir else None,
     )
-    print(f"   Wrote source profile → {profile_path}")
+    print(f"   Wrote conversion profile → {profile_path}")
 
 
 def _preserve_docx_office_vectors(input_file: Path, media_dir: Path, rel_media_dir: str, markdown: str) -> str:

@@ -711,7 +711,7 @@ def convert_presentation_to_markdown(
             )
         if image_manifest:
             print(f"   Wrote image manifest -> {asset_dir / 'image_manifest.json'}")
-    print(f"   Wrote source profile -> {profile_path}")
+    print(f"   Wrote conversion profile -> {profile_path}")
 
     return markdown_content
 

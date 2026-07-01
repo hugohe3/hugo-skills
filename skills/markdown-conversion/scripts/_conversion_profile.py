@@ -9,6 +9,7 @@ from typing import Any
 
 
 IMAGE_MANIFEST_NAME = "image_manifest.json"
+CONVERSION_PROFILE_SUFFIX = ".conversion_profile.json"
 SOURCE_PROFILE_NAME = "source_profile.json"
 
 
@@ -74,6 +75,12 @@ def read_json(path: Path) -> Any:
         return None
 
 
+def profile_path_for(markdown_path: str | Path) -> Path:
+    """Return the per-Markdown conversion profile path."""
+    markdown = Path(markdown_path)
+    return markdown.with_suffix(CONVERSION_PROFILE_SUFFIX)
+
+
 def build_source_profile(
     *,
     input_path: str,
@@ -100,7 +107,7 @@ def build_source_profile(
 
     source_exists = bool(source and source.exists())
     profile = {
-        "schema": "markdown-conversion.source_profile.v1",
+        "schema": "markdown-conversion.conversion_profile.v1",
         "converter": converter,
         "conversion_type": conversion_type,
         "source": {
@@ -132,9 +139,9 @@ def write_source_profile(
     asset_dir: str | None = None,
     warnings: list[str] | None = None,
 ) -> Path:
-    """Write source_profile.json beside the Markdown output."""
+    """Write a per-Markdown conversion profile beside the output."""
     markdown = Path(markdown_path)
-    profile_path = markdown.parent / SOURCE_PROFILE_NAME
+    profile_path = profile_path_for(markdown)
     profile = build_source_profile(
         input_path=input_path,
         markdown_path=markdown_path,
@@ -161,12 +168,14 @@ def build_result_payload(
     markdown = Path(markdown_path)
     assets = Path(asset_dir) if asset_dir else default_asset_dir(markdown)
     image_manifest = assets / IMAGE_MANIFEST_NAME
+    profile = str(Path(source_profile).resolve()) if source_profile else ""
     return {
         "input": str(Path(input_path).resolve()) if not input_path.startswith(("http://", "https://")) else input_path,
         "markdown": str(markdown.resolve()),
         "asset_dir": str(assets.resolve()) if assets.exists() else "",
         "image_manifest": str(image_manifest.resolve()) if image_manifest.exists() else "",
-        "source_profile": str(Path(source_profile).resolve()) if source_profile else "",
+        "conversion_profile": profile,
+        "source_profile": profile,
         "converter": converter,
         "conversion_type": conversion_type,
         "warnings": warnings or [],

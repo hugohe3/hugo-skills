@@ -1,29 +1,41 @@
 #!/usr/bin/env python3
-"""
-Unified Markdown Converter
+"""Unified Markdown converter.
 
-Auto-detects the input type and dispatches to the appropriate conversion script.
-Supports: PDF, Word/EPUB/HTML, Excel, PowerPoint, web pages, and subtitles.
+Auto-detects source type and dispatches to the backend converter. The
+dispatcher supports explicit multi-file inputs, non-recursive directory
+expansion, URLs, Markdown/text passthrough, and backend-specific flag pass-through.
 """
+
+from __future__ import annotations
 
 import argparse
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _conversion_profile import build_result_payload, write_source_profile  # noqa: E402
+from _batch import expand_directory_inputs, unique_output_path  # noqa: E402
+from _conversion_profile import (  # noqa: E402
+    build_result_payload,
+    profile_path_for,
+    write_source_profile,
+)
+from _dispatcher import (  # noqa: E402
+    default_markdown_path,
+    detect_source_type,
+    is_supported_directory_item,
+    is_url,
+    resolve_route,
+)
 
 
 SCRIPT_DIR = Path(__file__).parent
-SUBTITLE_SUFFIXES = {".srt", ".vtt", ".ass"}
-DOC_SUFFIXES = {".docx", ".doc", ".odt", ".rtf", ".epub", ".html", ".htm", ".ipynb",
-                ".tex", ".latex", ".rst", ".org", ".typ"}
-EXCEL_SUFFIXES = {".xlsx", ".xlsm"}
-PPTX_SUFFIXES = {".pptx", ".pptm", ".ppsx", ".ppsm", ".potx", ".potm"}
-MARKDOWN_SUFFIXES = {".md", ".markdown"}
-TEXT_SUFFIXES = {".txt", ".text"}
+
+
+def _print_status(message: str) -> None:
+    print(message, file=sys.stderr)
 
 
 def get_script_path(script_name: str) -> Path:
@@ -31,100 +43,75 @@ def get_script_path(script_name: str) -> Path:
 
 
 def run_subprocess(cmd: list[str], label: str) -> int:
-    print(f"[>>] Calling: {label}", flush=True)
+    _print_status(f"[>>] Calling: {label}")
     try:
-        return subprocess.run(cmd, check=False).returncode
+        result = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
     except KeyboardInterrupt:
         return 130
+
+    if result.stdout.strip():
+        print(result.stdout.strip(), file=sys.stderr)
+    if result.stderr.strip():
+        print(result.stderr.strip(), file=sys.stderr)
+    return result.returncode
 
 
 def run_python_script(script_name: str, args: list[str]) -> int:
     script_path = get_script_path(script_name)
     if not script_path.exists():
-        print(f"Error: Script not found: {script_path}")
+        print(f"[ERROR] Script not found: {script_path}", file=sys.stderr)
         return 1
-
     cmd = [sys.executable, str(script_path)] + args
     return run_subprocess(cmd, f"{script_name} {' '.join(args)}".strip())
 
 
-SKIP_SUFFIXES = MARKDOWN_SUFFIXES | TEXT_SUFFIXES | {".json", ".yaml", ".yml", ".log"}
+def resolve_output(output_arg: str | None, input_arg: str) -> Path:
+    return Path(output_arg) if output_arg else default_markdown_path(input_arg)
 
 
-def list_convertible_files(path: Path) -> list[Path]:
-    """Return convertible files in a directory (one level), skipping md/txt/hidden/etc."""
-    return sorted(
-        f for f in path.iterdir()
-        if f.is_file()
-        and not f.name.startswith(".")
-        and f.suffix.lower() not in SKIP_SUFFIXES
-    )
+def build_output_args(output_path: str | Path | None) -> list[str]:
+    return ["-o", str(output_path)] if output_path else []
 
 
-def detect_type(input_arg: str) -> str:
-    """Detect the input type from a file path, directory, or URL."""
-    if input_arg.startswith(("http://", "https://")):
-        return "pdf_url" if input_arg.lower().endswith(".pdf") else "web"
-
-    path = Path(input_arg)
-    if not path.exists():
-        return "unknown"
-
-    if path.is_dir():
-        return "dir"
-
-    suffix = path.suffix.lower()
-    if suffix == ".pdf":
-        return "pdf"
-    if suffix in SUBTITLE_SUFFIXES:
-        return "subtitle"
-    if suffix in EXCEL_SUFFIXES:
-        return "excel"
-    if suffix in PPTX_SUFFIXES:
-        return "pptx"
-    if suffix in DOC_SUFFIXES:
-        return "doc"
-    if suffix in MARKDOWN_SUFFIXES:
-        return "markdown"
-    if suffix in TEXT_SUFFIXES:
-        return "text"
-    return "unknown"
-
-
-def default_output_path(input_path: str) -> str:
-    """Return default output .md path alongside the input file."""
-    p = Path(input_path)
-    return str(p.parent / (p.stem + ".md"))
-
-
-def resolve_output(output_arg: str | None, input_path: str) -> str:
-    """Return the resolved output path (explicit or default)."""
-    return output_arg if output_arg else default_output_path(input_path)
-
-
-def build_output_args(output_path: str | None) -> list[str]:
-    return ["-o", output_path] if output_path else []
-
-
-def print_output(path: str) -> None:
+def print_output(path: str | Path) -> None:
     print(f"OUTPUT: {Path(path).resolve()}")
 
 
-def write_profile(input_arg: str, output_path: str, converter: str, conv_type: str) -> Path:
-    """Write source_profile.json for one successful conversion."""
+def write_profile(input_arg: str, output_path: str | Path, converter: str, conv_type: str) -> Path:
+    """Write a conversion profile for one successful conversion."""
     return write_source_profile(
         input_path=input_arg,
-        markdown_path=output_path,
+        markdown_path=str(output_path),
         converter=converter,
         conversion_type=conv_type,
     )
 
 
-def print_json_result(input_arg: str, output_path: str, converter: str, conv_type: str, profile_path: Path | None) -> None:
-    """Print a machine-readable conversion result."""
+def ensure_profile(input_arg: str, output_path: str | Path, converter: str, conv_type: str) -> Path:
+    """Return an existing backend profile or write one if the backend skipped it."""
+    profile_path = profile_path_for(output_path)
+    if profile_path.is_file():
+        return profile_path
+    return write_profile(input_arg, output_path, converter, conv_type)
+
+
+def print_json_result(
+    input_arg: str,
+    output_path: str | Path,
+    converter: str,
+    conv_type: str,
+    profile_path: Path | None,
+) -> None:
     payload = build_result_payload(
         input_path=input_arg,
-        markdown_path=output_path,
+        markdown_path=str(output_path),
         converter=converter,
         conversion_type=conv_type,
         source_profile=str(profile_path) if profile_path else None,
@@ -133,7 +120,7 @@ def print_json_result(input_arg: str, output_path: str, converter: str, conv_typ
 
 
 def mineru_local_paths(input_arg: str, output: str | None) -> tuple[list[str], Path, Path | None]:
-    """Return MinerU output args, final Markdown path, and an optional generated path to rename."""
+    """Return MinerU CLI args, final Markdown path, and optional generated path to rename."""
     input_path = Path(input_arg)
     default_md = input_path.parent / f"{input_path.stem}.md"
     if not output:
@@ -154,279 +141,391 @@ def rename_generated_output(generated: Path | None, requested: Path) -> int:
     if generated is None:
         return 0
     if not generated.exists():
-        print(f"[ERROR] Expected MinerU output not found: {generated}")
+        print(f"[ERROR] Expected MinerU output not found: {generated}", file=sys.stderr)
         return 1
     requested.parent.mkdir(parents=True, exist_ok=True)
     generated.replace(requested)
     return 0
 
 
-def reserve_batch_output(input_file: Path, out_root: Path, used_names: set[str]) -> Path:
-    out_path = out_root / f"{input_file.stem}.md"
-    if out_path.name in used_names:
-        suffix = input_file.suffix.lower().lstrip(".") or "file"
-        out_path = out_root / f"{input_file.stem}_{suffix}.md"
-        counter = 2
-        while out_path.name in used_names:
-            out_path = out_root / f"{input_file.stem}_{suffix}_{counter}.md"
-            counter += 1
-    used_names.add(out_path.name)
-    return out_path
+def _image_args(no_images: bool, filter_images: bool) -> list[str]:
+    if no_images:
+        return ["--no-images"]
+    if filter_images:
+        return ["--filter-images"]
+    return []
 
 
-def parse_args() -> tuple[argparse.Namespace, list[str]]:
+def _pdf_image_args(no_images: bool, filter_images: bool, unknown_args: list[str]) -> list[str]:
+    has_explicit_images = any(arg == "--images" or arg.startswith("--images=") for arg in unknown_args)
+    if has_explicit_images:
+        return []
+    if no_images:
+        return ["--images", "none"]
+    if filter_images:
+        return ["--images", "filtered"]
+    return []
+
+
+def write_passthrough(input_arg: str, output: Path, conv_type: str, json_output: bool) -> int:
+    """Copy Markdown/text-like input and write a conversion profile."""
+    source = Path(input_arg)
+    try:
+        text = source.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        print(f"[ERROR] Cannot read {source}: {exc}", file=sys.stderr)
+        return 1
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if output.resolve() != source.resolve():
+        output.write_text(text, encoding="utf-8")
+
+    profile_path = write_profile(input_arg, output, "convert.py", conv_type)
+    _print_status(f"[OK] Saved Markdown to: {output}")
+    _print_status(f"   Wrote conversion profile -> {profile_path}")
+    print_output(output)
+    if json_output:
+        print_json_result(input_arg, output, "convert.py", conv_type, profile_path)
+    return 0
+
+
+def dispatch_single(
+    input_arg: str,
+    conv_type: str,
+    output: str | None,
+    use_mineru: bool,
+    no_images: bool,
+    filter_images: bool,
+    raw: bool,
+    unknown_args: list[str],
+    json_output: bool = False,
+    web_output_dir: str | None = None,
+) -> int:
+    """Dispatch one input to the right converter. Returns a process exit code."""
+    route = resolve_route(input_arg, conv_type)
+    conv_type = route.conversion_type
+
+    if conv_type in {"markdown", "text"}:
+        return write_passthrough(input_arg, resolve_output(output, input_arg), conv_type, json_output)
+
+    if conv_type in {"directory", "unknown"} or not route.script_name:
+        print(
+            f"[ERROR] Could not determine conversion type for {input_arg!r}. "
+            "Use -t pdf|doc|excel|pptx|web|sub.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not is_url(input_arg) and not Path(input_arg).exists():
+        print(f"[ERROR] File not found: {input_arg}", file=sys.stderr)
+        return 1
+
+    raw_args = ["--raw"] if raw else []
+
+    if conv_type == "pdf":
+        route_mineru = use_mineru or is_url(input_arg)
+        if route_mineru:
+            if is_url(input_arg):
+                out_path = Path(output) if output else None
+                out_args = build_output_args(out_path)
+                rename_from = None
+            else:
+                out_args, out_path, rename_from = mineru_local_paths(input_arg, output)
+
+            image_args = _image_args(no_images, filter_images)
+            script_args = (
+                (["--url", input_arg] if is_url(input_arg) else [input_arg])
+                + out_args
+                + image_args
+                + raw_args
+                + unknown_args
+            )
+            rc = run_python_script("pdf_to_md_mineru.py", script_args)
+            converter = "pdf_to_md_mineru.py"
+        else:
+            out_path = resolve_output(output, input_arg)
+            rename_from = None
+            script_args = (
+                [input_arg]
+                + build_output_args(out_path)
+                + _pdf_image_args(no_images, filter_images, unknown_args)
+                + raw_args
+                + unknown_args
+            )
+            rc = run_python_script("pdf_to_md.py", script_args)
+            converter = "pdf_to_md.py"
+
+        if rc != 0:
+            return rc
+        if out_path is not None:
+            rc = rename_generated_output(rename_from, out_path)
+            if rc != 0:
+                return rc
+            if out_path.is_file():
+                profile_path = ensure_profile(input_arg, out_path, converter, "pdf")
+                print_output(out_path)
+                if json_output:
+                    print_json_result(input_arg, out_path, converter, "pdf", profile_path)
+        return 0
+
+    if conv_type == "web":
+        out_path = Path(output) if output else None
+        emit_result: Path | None = None
+        extra_args = list(unknown_args)
+        if out_path is None:
+            emit_file = tempfile.NamedTemporaryFile(
+                prefix="markdown-conversion-web-result-",
+                suffix=".json",
+                delete=False,
+            )
+            emit_file.close()
+            emit_result = Path(emit_file.name)
+            extra_args.extend(["--emit-result", str(emit_result)])
+        dir_args = ["-d", web_output_dir] if out_path is None and web_output_dir else []
+        script_args = (
+            [input_arg]
+            + build_output_args(out_path)
+            + dir_args
+            + _image_args(no_images, filter_images)
+            + raw_args
+            + extra_args
+        )
+        rc = run_python_script("web_to_md.py", script_args)
+        if rc != 0:
+            if emit_result:
+                emit_result.unlink(missing_ok=True)
+            return rc
+        if out_path is None and emit_result is not None:
+            out_path = _read_emitted_markdown_path(emit_result)
+            emit_result.unlink(missing_ok=True)
+        if out_path and out_path.is_file():
+            profile_path = ensure_profile(input_arg, out_path, "web_to_md.py", "web")
+            print_output(out_path)
+            if json_output:
+                print_json_result(input_arg, out_path, "web_to_md.py", "web", profile_path)
+            return 0
+        print("[ERROR] Web conversion did not produce a Markdown output path", file=sys.stderr)
+        if out_path:
+            print(f"[ERROR] Expected Markdown output not found: {out_path}", file=sys.stderr)
+        return 1
+
+    out_path = resolve_output(output, input_arg)
+    if conv_type == "excel":
+        script_args = [input_arg] + build_output_args(out_path) + unknown_args
+    elif conv_type == "subtitle":
+        script_args = [input_arg] + build_output_args(out_path) + raw_args + unknown_args
+    else:
+        script_args = [input_arg] + build_output_args(out_path) + _image_args(no_images, filter_images) + raw_args + unknown_args
+
+    rc = run_python_script(route.script_name, script_args)
+    if rc != 0:
+        return rc
+        if out_path.is_file():
+            profile_path = ensure_profile(input_arg, out_path, route.script_name, conv_type)
+            print_output(out_path)
+            if json_output:
+                print_json_result(input_arg, out_path, route.script_name, conv_type, profile_path)
+    return 0
+
+
+def _read_emitted_markdown_path(path: Path) -> Path | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    markdown = payload.get("markdown")
+    return Path(markdown) if isinstance(markdown, str) and markdown else None
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Unified Markdown Converter",
+        description="Auto-detect source type and convert to Markdown.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python3 convert.py paper.pdf                 # PDF -> Markdown (local PyMuPDF, default)
-  python3 convert.py paper.pdf --mineru        # PDF -> Markdown (MinerU cloud high-accuracy)
-  python3 convert.py https://site.com/article  # Web -> Markdown (Python with curl_cffi)
-  python3 convert.py report.docx               # Word -> Markdown
-  python3 convert.py data.xlsx                 # Excel -> Markdown
-  python3 convert.py deck.pptx                 # PowerPoint -> Markdown
-  python3 convert.py ./video_course -t sub     # Subtitles -> Markdown
+  python3 convert.py paper.pdf
+  python3 convert.py paper.pdf report.docx deck.pptx
+  python3 convert.py ./mixed_docs -o ./out
+  python3 convert.py paper.pdf --mineru
+  python3 convert.py https://site.com/article
+  python3 convert.py ./video_course -t sub
+
+Backend-specific flags not listed here are passed through to the selected
+converter, so existing converter behavior remains the source of truth.
         """,
     )
-
-    parser.add_argument("input", help="Input file, directory, or URL")
+    parser.add_argument("inputs", nargs="+", help="Input file(s), directories, or URL(s)")
     parser.add_argument(
         "-t",
         "--type",
-        choices=["pdf", "doc", "excel", "pptx", "web", "sub", "auto"],
+        choices=["pdf", "doc", "excel", "pptx", "web", "sub", "markdown", "text", "auto"],
         default="auto",
-        help="Force specific conversion type",
+        help="Force a specific conversion type",
     )
     parser.add_argument(
         "--mineru",
         action="store_true",
-        help="Use MinerU cloud parser instead of local parser (PDF only)",
+        help="Use MinerU cloud parser instead of local parser for PDF inputs",
     )
     parser.add_argument(
         "--no-images",
         action="store_true",
-        help="Skip image extraction across all backends (drops image references from output)",
+        help="Skip image extraction across image-capable backends",
     )
     parser.add_argument(
         "--filter-images",
         action="store_true",
-        help="Filter decorative images (logos, tracking pixels, low-info blocks) — keeps information-bearing images",
+        help="Filter decorative images while keeping information-bearing images",
     )
     parser.add_argument(
         "--raw",
         action="store_true",
-        help="Faithful reproduction: disable all heuristic cleaning (header/footer dedup, heading detection, web main-content extraction, subtitle paragraph anchors)",
+        help="Disable heuristic cleaning where a backend supports it",
     )
-    parser.add_argument("-o", "--output", help="Output path")
+    parser.add_argument(
+        "-o",
+        "--output",
+        help="Output Markdown file for one input, or output directory for multiple inputs/directories",
+    )
     parser.add_argument(
         "--json",
         action="store_true",
         help="Print machine-readable conversion result after success",
     )
-    return parser.parse_known_args()
+    return parser
 
 
-def dispatch_single(input_arg: str, conv_type: str, output: str | None, use_mineru: bool, no_images: bool, filter_images: bool, raw: bool, unknown_args: list[str], json_output: bool = False) -> int:
-    """Dispatch one input (single file or URL) to the right converter. Returns exit code."""
-    if conv_type == "sub":
-        conv_type = "subtitle"
-    if conv_type == "pdf_url":
-        conv_type = "pdf"
-
-    if conv_type == "markdown":
-        print(f"[OK] Input is already Markdown: {input_arg}")
-        print_output(input_arg)
-        profile_path = write_profile(input_arg, input_arg, "convert.py", "markdown")
-        if json_output:
-            print_json_result(input_arg, input_arg, "convert.py", "markdown", profile_path)
-        return 0
-
-    if conv_type == "text":
-        out = resolve_output(output, input_arg)
-        src = Path(input_arg).read_text(encoding="utf-8", errors="replace")
-        Path(out).write_text(src, encoding="utf-8")
-        print(f"[OK] Plain text copied as Markdown: {out}")
-        print_output(out)
-        profile_path = write_profile(input_arg, out, "convert.py", "text")
-        if json_output:
-            print_json_result(input_arg, out, "convert.py", "text", profile_path)
-        return 0
-
-    if conv_type == "pdf":
-        is_url = input_arg.startswith(("http://", "https://"))
-        route_mineru = use_mineru or is_url
-        if route_mineru:
-            if is_url:
-                out = output
-                out_args = build_output_args(out)
-                rename_from = None
-            else:
-                out_args, out_path, rename_from = mineru_local_paths(input_arg, output)
-                out = str(out_path)
-            if no_images:
-                image_args = ["--no-images"]
-            elif filter_images:
-                image_args = ["--filter-images"]
-            else:
-                image_args = []
-            raw_args = ["--raw"] if raw else []
-            script_args = (["--url", input_arg] if is_url else [input_arg]) + out_args + image_args + raw_args + unknown_args
-            rc = run_python_script("pdf_to_md_mineru.py", script_args)
-        else:
-            out = resolve_output(output, input_arg)
-            rename_from = None
-            # Map --no-images / --filter-images onto pdf_to_md.py's --images
-            # tri-state; defer to any explicit --images in unknown_args.
-            has_explicit_images = any(a == "--images" or a.startswith("--images=") for a in unknown_args)
-            if has_explicit_images:
-                image_args = []
-            elif no_images:
-                image_args = ["--images", "none"]
-            elif filter_images:
-                image_args = ["--images", "filtered"]
-            else:
-                image_args = []
-            raw_args = ["--raw"] if raw else []
-            script_args = [input_arg] + build_output_args(out) + image_args + raw_args + unknown_args
-            rc = run_python_script("pdf_to_md.py", script_args)
-        if rc != 0:
-            return rc
-        rc = rename_generated_output(rename_from, Path(out)) if out else 0
-        if rc != 0:
-            return rc
-        if out and not (route_mineru and is_url):
-            print_output(out)
-            profile_path = write_profile(input_arg, out, "pdf_to_md_mineru.py" if route_mineru else "pdf_to_md.py", "pdf")
-            if json_output:
-                print_json_result(input_arg, out, "pdf_to_md_mineru.py" if route_mineru else "pdf_to_md.py", "pdf", profile_path)
-        return 0
-
-    image_args: list[str] = []
-    if no_images:
-        image_args = ["--no-images"]
-    elif filter_images:
-        image_args = ["--filter-images"]
-    raw_args = ["--raw"] if raw else []
-
-    if conv_type == "web":
-        out = output
-        script_args = [input_arg] + build_output_args(out) + image_args + raw_args + unknown_args
-        rc = run_python_script("web_to_md.py", script_args)
-        if rc != 0:
-            return rc
-        if out:
-            print_output(out)
-            profile_path = write_profile(input_arg, out, "web_to_md.py", "web")
-            if json_output:
-                print_json_result(input_arg, out, "web_to_md.py", "web", profile_path)
-        return 0
-
-    if conv_type == "doc":
-        out = resolve_output(output, input_arg)
-        script_args = [input_arg] + build_output_args(out) + image_args + raw_args + unknown_args
-        rc = run_python_script("doc_to_md.py", script_args)
-        if rc != 0:
-            return rc
-        print_output(out)
-        profile_path = write_profile(input_arg, out, "doc_to_md.py", "doc")
-        if json_output:
-            print_json_result(input_arg, out, "doc_to_md.py", "doc", profile_path)
-        return 0
-
-    if conv_type == "excel":
-        out = resolve_output(output, input_arg)
-        script_args = [input_arg] + build_output_args(out) + unknown_args
-        rc = run_python_script("excel_to_md.py", script_args)
-        if rc != 0:
-            return rc
-        print_output(out)
-        profile_path = write_profile(input_arg, out, "excel_to_md.py", "excel")
-        if json_output:
-            print_json_result(input_arg, out, "excel_to_md.py", "excel", profile_path)
-        return 0
-
-    if conv_type == "pptx":
-        out = resolve_output(output, input_arg)
-        script_args = [input_arg] + build_output_args(out) + image_args + raw_args + unknown_args
-        rc = run_python_script("ppt_to_md.py", script_args)
-        if rc != 0:
-            return rc
-        print_output(out)
-        profile_path = write_profile(input_arg, out, "ppt_to_md.py", "pptx")
-        if json_output:
-            print_json_result(input_arg, out, "ppt_to_md.py", "pptx", profile_path)
-        return 0
-
-    if conv_type == "subtitle":
-        out = resolve_output(output, input_arg) if Path(input_arg).is_file() else output
-        script_args = [input_arg] + build_output_args(out) + raw_args + unknown_args
-        rc = run_python_script("subtitle_to_md.py", script_args)
-        if rc != 0:
-            return rc
-        return 0
-
-    print(
-        f"Error: Could not determine conversion type for '{input_arg}'. "
-        "Please use -t/--type to specify one of: pdf, doc, excel, pptx, web, sub."
-    )
-    return 1
-
-
-def batch_directory(input_dir: str, output_dir: str | None, use_mineru: bool, no_images: bool, filter_images: bool, raw: bool, unknown_args: list[str], json_output: bool = False) -> tuple[int, Path]:
-    """Convert every convertible file in a directory. Returns (failures, output_root)."""
-    in_path = Path(input_dir)
-    files = list_convertible_files(in_path)
-    out_root = Path(output_dir) if output_dir else in_path
-    if not files:
-        print(f"[ERROR] No convertible files in directory: {input_dir}")
-        return 1, out_root
-
-    out_root.mkdir(parents=True, exist_ok=True)
-
-    print(f"[INFO] Batch mode: {len(files)} file(s) in {in_path}")
-    succeeded = 0
-    failures = 0
-    skipped = 0
-    used_outputs: set[str] = set()
-    for i, f in enumerate(files, 1):
-        per_type = detect_type(str(f))
-        if per_type in {"unknown", "dir"}:
-            print(f"  [{i}/{len(files)}] [SKIP] {f.name} (unsupported)")
-            skipped += 1
-            continue
-        per_out = str(reserve_batch_output(f, out_root, used_outputs))
-        print(f"  [{i}/{len(files)}] {f.name}")
-        rc = dispatch_single(str(f), per_type, per_out, use_mineru, no_images, filter_images, raw, unknown_args, json_output=json_output)
-        if rc == 0:
-            succeeded += 1
-        else:
-            failures += 1
-    print(
-        f"[OK] Batch done: {succeeded} succeeded, "
-        f"{failures} failed, {skipped} skipped"
-    )
-    return failures, out_root
-
-
-def main() -> int:
-    args, unknown_args = parse_args()
-    conv_type = args.type
-
-    if conv_type == "auto":
-        conv_type = detect_type(args.input)
-
-    # Mutually exclusive image flags
+def _validate_image_options(args: argparse.Namespace) -> bool:
     if args.no_images and args.filter_images:
-        print("Error: --no-images and --filter-images are mutually exclusive.")
+        print("[ERROR] --no-images and --filter-images are mutually exclusive.", file=sys.stderr)
+        return False
+    return True
+
+
+def _resolve_output_arg(
+    input_arg: str,
+    conversion_type: str,
+    output_arg: str | None,
+    batch_mode: bool,
+    used_outputs: set[Path],
+) -> str | None:
+    if conversion_type == "subtitle" and not is_url(input_arg) and Path(input_arg).is_dir():
+        return output_arg
+    if conversion_type == "web" and not output_arg:
+        return None
+    if not output_arg:
+        return str(default_markdown_path(input_arg))
+    if batch_mode:
+        if conversion_type == "web":
+            return None
+        return str(unique_output_path(Path(output_arg), default_markdown_path(input_arg).stem, used_outputs))
+    return output_arg
+
+
+def dispatch_many(
+    inputs: list[str],
+    args: argparse.Namespace,
+    unknown_args: list[str],
+    initial_failures: list[str] | None = None,
+    saw_directory: bool = False,
+) -> int:
+    batch_mode = saw_directory or len(inputs) > 1
+    if args.output and batch_mode:
+        output_dir = Path(args.output)
+        if output_dir.exists() and not output_dir.is_dir():
+            print(f"[ERROR] Batch output path is not a directory: {args.output}", file=sys.stderr)
+            return 1
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    success_count = 0
+    failed: list[str] = []
+    skipped: list[str] = list(initial_failures or [])
+    used_outputs: set[Path] = set()
+
+    for input_arg in inputs:
+        route = resolve_route(input_arg, args.type)
+        output_arg = _resolve_output_arg(
+            input_arg,
+            route.conversion_type,
+            args.output,
+            batch_mode,
+            used_outputs,
+        )
+        if batch_mode:
+            _print_status(f"\n==> {input_arg}")
+
+        rc = dispatch_single(
+            input_arg,
+            route.conversion_type,
+            output_arg,
+            args.mineru,
+            args.no_images,
+            args.filter_images,
+            args.raw,
+            unknown_args,
+            json_output=args.json,
+            web_output_dir=args.output if batch_mode and route.conversion_type == "web" else None,
+        )
+        if rc == 0:
+            success_count += 1
+        else:
+            failed.append(f"{input_arg}: exit {rc}")
+
+    if batch_mode:
+        _print_status(f"\n[Done] Success: {success_count}/{len(inputs)}, Failed: {len(failed)}")
+        if skipped:
+            _print_status("\n[Skipped directories]:")
+            for item in skipped:
+                _print_status(f"  - {item}")
+        if failed:
+            _print_status("\n[Failed inputs]:")
+            for item in failed:
+                _print_status(f"  - {item}")
+
+    if not inputs:
+        return 1
+    return 0 if not failed and not skipped else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args, unknown_args = parser.parse_known_args(argv)
+
+    if not _validate_image_options(args):
         return 2
 
-    if conv_type == "dir":
-        failures, _ = batch_directory(args.input, args.output, args.mineru, args.no_images, args.filter_images, args.raw, unknown_args, json_output=args.json)
-        return 0 if failures == 0 else 1
+    if args.type == "sub":
+        inputs = args.inputs
+        expansion_errors: list[str] = []
+        saw_directory = any((not is_url(item)) and Path(item).is_dir() for item in inputs)
+    else:
+        inputs, expansion_errors, saw_directory = expand_directory_inputs(
+            args.inputs,
+            is_supported_directory_item,
+            is_external_ref=is_url,
+        )
 
-    return dispatch_single(args.input, conv_type, args.output, args.mineru, args.no_images, args.filter_images, args.raw, unknown_args, json_output=args.json)
+    if unknown_args:
+        passthrough_types = {
+            resolve_route(item, args.type).conversion_type
+            for item in inputs
+            if detect_source_type(item) in {"markdown", "text"} or args.type in {"markdown", "text"}
+        }
+        if passthrough_types:
+            print(
+                "[ERROR] Backend-specific flags cannot be used with markdown/text passthrough inputs",
+                file=sys.stderr,
+            )
+            return 2
+
+    return dispatch_many(
+        inputs,
+        args,
+        unknown_args,
+        initial_failures=expansion_errors,
+        saw_directory=saw_directory,
+    )
 
 
 if __name__ == "__main__":
-    exit(main())
+    raise SystemExit(main())
