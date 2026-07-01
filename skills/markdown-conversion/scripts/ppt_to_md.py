@@ -182,10 +182,44 @@ def run_hyperlink(run: object, shape: object | None) -> str | None:
     return resolve_run_internal_jump(run, shape) or hyperlink_address(run)
 
 
+def paragraph_has_hyperlink(paragraph: object) -> bool:
+    """Return whether a paragraph contains any run-level hyperlink."""
+    for run in getattr(paragraph, "runs", []):
+        try:
+            if run.hyperlink.address:
+                return True
+        except AttributeError:
+            pass
+        try:
+            rpr = run._r.find(qn("a:rPr"))
+            if rpr is not None and rpr.find(qn("a:hlinkClick")) is not None:
+                return True
+        except AttributeError:
+            continue
+    return False
+
+
 def paragraph_to_markdown(paragraph: object, fallback_hyperlink: str | None = None, shape: object | None = None) -> str:
     """Convert one PowerPoint paragraph into Markdown text."""
-    segments = []
+    parts: list[str] = []
+    current_url: str | None = None
+    current_text = ""
     has_run_hyperlink = False
+
+    def flush() -> None:
+        nonlocal current_text
+        if not current_text:
+            return
+        if current_url is None:
+            parts.append(current_text)
+            current_text = ""
+            return
+        leading = current_text[: len(current_text) - len(current_text.lstrip())]
+        trailing = current_text[len(current_text.rstrip()):]
+        core = current_text.strip()
+        display = core if core else current_url
+        parts.append(f"{leading}{markdown_link(display, current_url)}{trailing}")
+        current_text = ""
 
     for run in getattr(paragraph, "runs", []):
         text = normalize_inline_text(getattr(run, "text", ""))
@@ -193,14 +227,15 @@ def paragraph_to_markdown(paragraph: object, fallback_hyperlink: str | None = No
             continue
 
         address = run_hyperlink(run, shape)
-        if address and text.strip():
-            leading = " " if text.startswith(" ") else ""
-            trailing = " " if text.endswith(" ") else ""
-            text = f"{leading}{markdown_link(text.strip(), address)}{trailing}"
+        if address:
             has_run_hyperlink = True
-        segments.append(text)
+        if address != current_url:
+            flush()
+            current_url = address
+        current_text += text
+    flush()
 
-    text_md = re.sub(r"\s+", " ", "".join(segments)).strip()
+    text_md = re.sub(r"\s+", " ", "".join(parts)).strip()
     if not text_md:
         text_md = normalize_text(getattr(paragraph, "text", "")).replace("\n", " ")
 
@@ -215,7 +250,7 @@ def text_frame_to_markdown(text_frame: object, fallback_hyperlink: str | None = 
     visible_paragraphs = []
     for paragraph in text_frame.paragraphs:
         text_md = paragraph_to_markdown(paragraph, fallback_hyperlink, shape)
-        if text_md:
+        if text_md or paragraph_has_hyperlink(paragraph):
             visible_paragraphs.append((paragraph, text_md))
 
     if not visible_paragraphs:

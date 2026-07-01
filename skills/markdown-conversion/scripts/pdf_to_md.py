@@ -6,6 +6,8 @@ Supports heading levels, bold, italic, and list detection.
 """
 
 import argparse
+import hashlib
+import json
 import os
 import re
 import sys
@@ -28,7 +30,7 @@ FONT_H2_SIZE = 18
 FONT_H3_SIZE = 14
 HEADER_FOOTER_SAMPLE_LIMIT = 40
 HEADER_FOOTER_EDGE_SAMPLE_SIZE = 20
-VECTOR_RENDER_ZOOM = 2
+VECTOR_FIGURE_DPI = 144
 VECTOR_CLUSTER_TOLERANCE = 6
 VECTOR_MIN_WIDTH = 72
 VECTOR_MIN_HEIGHT = 36
@@ -39,6 +41,7 @@ VECTOR_CAPTION_HORIZONTAL_GAP = 90
 MAX_VECTOR_BACKGROUND_AREA_RATIO = 1.9
 FIGURE_CAPTION_RE = re.compile(r'^(?:Figure|Fig\.)\s*\d+\s*[:.]', re.IGNORECASE)
 CONTROL_CHARS_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
+LINE_SORT_BUCKET = 8.0
 
 
 def analyze_font_sizes(doc: fitz.Document) -> dict[str, float]:
@@ -215,6 +218,17 @@ def remove_page_footer(text: str) -> str:
     text = re.sub(pattern_cn, '', text)
 
     return text.rstrip()
+
+
+def element_sort_fields(bbox: tuple | fitz.Rect) -> dict[str, float]:
+    """Return stable reading-order sort fields for an extracted element."""
+    rect = fitz.Rect(bbox)
+    center_y = (rect.y0 + rect.y1) / 2
+    return {
+        "y0": rect.y0,
+        "x0": rect.x0,
+        "sort_y": round(center_y / LINE_SORT_BUCKET) * LINE_SORT_BUCKET,
+    }
 
 
 def detect_headers_footers(doc: fitz.Document, threshold_ratio: float = 0.6) -> set[str]:
@@ -566,15 +580,41 @@ def should_keep_vector_rect(
     return True
 
 
-def render_vector_rect(page: fitz.Page, rect: fitz.Rect) -> bytes:
+def count_text_lines_in_rect(page: fitz.Page, rect: fitz.Rect, threshold: float = 0.2) -> int:
+    """Count text lines substantially overlapping a rectangle."""
+    count = 0
+    for block in page.get_text("dict")["blocks"]:
+        if block.get("type") != 0:
+            continue
+        for line in block["lines"]:
+            line_rect = fitz.Rect(line["bbox"])
+            if _overlap_ratio(line_rect, rect) > threshold:
+                count += 1
+    return count
+
+
+def is_text_dominant_vector_rect(page: fitz.Page, rect: fitz.Rect) -> bool:
+    """Reject large vector clusters that are just page layout lines behind text."""
+    text_line_count = count_text_lines_in_rect(page, rect)
+    if text_line_count < 6:
+        return False
+
+    page_rect = page.rect
+    width_ratio = rect.width / max(page_rect.width, 1)
+    height_ratio = rect.height / max(page_rect.height, 1)
+    return width_ratio > 0.55 and height_ratio > 0.12
+
+
+def render_vector_rect(page: fitz.Page, rect: fitz.Rect, dpi: int = VECTOR_FIGURE_DPI) -> bytes:
     """Render a vector drawing region to PNG bytes."""
     clip = fitz.Rect(rect)
     clip.x0 = max(page.rect.x0, clip.x0 - VECTOR_CLIP_PADDING)
     clip.y0 = max(page.rect.y0, clip.y0 - VECTOR_CLIP_PADDING)
     clip.x1 = min(page.rect.x1, clip.x1 + VECTOR_CLIP_PADDING)
     clip.y1 = min(page.rect.y1, clip.y1 + VECTOR_CLIP_PADDING)
+    zoom = dpi / 72
     pixmap = page.get_pixmap(
-        matrix=fitz.Matrix(VECTOR_RENDER_ZOOM, VECTOR_RENDER_ZOOM),
+        matrix=fitz.Matrix(zoom, zoom),
         clip=clip,
         alpha=False,
     )
@@ -597,6 +637,45 @@ def remove_text_inside_vector_images(
                 continue
         filtered.append(element)
     return filtered
+
+
+def table_shape_stats(table: object) -> tuple[int, int, int, float, float]:
+    """Return rows, columns, non-empty cells, density, and unique-text ratio."""
+    try:
+        rows_data = table.extract()
+    except Exception:
+        return 0, 0, 0, 0.0, 0.0
+
+    row_count = len(rows_data)
+    col_count = max((len(row) for row in rows_data), default=0)
+    total_cells = max(row_count * col_count, 1)
+    nonempty = [
+        str(cell).strip()
+        for row in rows_data
+        for cell in row
+        if str(cell or "").strip()
+    ]
+    nonempty_count = len(nonempty)
+    density = nonempty_count / total_cells
+    unique_ratio = len(set(nonempty)) / nonempty_count if nonempty_count else 0.0
+    return row_count, col_count, nonempty_count, density, unique_ratio
+
+
+def should_emit_pdf_table(table: object) -> bool:
+    """Reject layout-line false positives from PyMuPDF table detection."""
+    row_count, col_count, nonempty_count, density, unique_ratio = table_shape_stats(table)
+
+    if row_count < 2 or col_count < 2:
+        return False
+    if nonempty_count < 4:
+        return False
+    if density < 0.30:
+        return False
+    if col_count >= 12 and density < 0.45:
+        return False
+    if row_count >= 8 and col_count >= 8 and density < 0.55 and unique_ratio < 0.85:
+        return False
+    return True
 
 
 def clean_text(text: str) -> str:
@@ -641,6 +720,15 @@ def merge_adjacent_formatting(text: str) -> str:
     return text
 
 
+def normalize_emphasis_boundaries(text: str) -> str:
+    """Add spacing after emphasized labels so CommonMark closes the marker."""
+    label_end = r"[:：;；,，、。]"
+    following_text = r"(?=[\u3400-\u9fffA-Za-z0-9])"
+    text = re.sub(rf"(\*{{3}}[^\n*]+{label_end}\*{{3}}){following_text}", r"\1 ", text)
+    text = re.sub(rf"(\*{{2}}[^\n*]+{label_end}\*{{2}}){following_text}", r"\1 ", text)
+    return text
+
+
 def is_sentence_end(text: str) -> bool:
     """Check if the text ends with sentence-ending punctuation."""
     text = text.rstrip()
@@ -650,18 +738,58 @@ def is_sentence_end(text: str) -> bool:
     return text[-1] in end_puncts
 
 
+def starts_structural_label(text: str) -> bool:
+    """Return whether a line starts a new labeled section or field."""
+    stripped = text.strip()
+    return bool(re.match(
+        r"^(?:\*\*)?(?:问题\s*\d*|回复|收\s*件\s*人|发\s*件\s*人|邮\s*箱|日\s*期|电\s*话|编\s*号|总\s*页\s*数|主\s*题|标段编号)",
+        stripped,
+    ))
+
+
+def join_wrapped_lines(current: str, next_line: str) -> str:
+    """Join wrapped PDF lines without inserting spaces inside CJK words."""
+    current = current.rstrip()
+    next_line = next_line.lstrip()
+    if not current:
+        return next_line
+    if not next_line:
+        return current
+
+    cjk = r"[\u3400-\u9fff]"
+    if current.endswith("**") and next_line.startswith("**"):
+        left = current[:-2].rstrip()
+        right = next_line[2:].lstrip()
+        if re.search(cjk + r"$", left) and re.match(cjk, right):
+            return left + right
+        return left + " " + right
+
+    if re.search(cjk + r"$", current) and re.match(cjk, next_line):
+        return current + next_line
+    return current + " " + next_line
+
+
 def should_merge_lines(current: dict, next_line: dict) -> bool:
     """Determine if two lines should be merged into the same paragraph."""
     if current.get("is_heading") or next_line.get("is_heading"):
         return False
     if current.get("is_list") or next_line.get("is_list"):
         return False
+    if starts_structural_label(next_line.get("content", "")):
+        return False
     if is_sentence_end(current.get("content", "")):
         return False
     return True
 
 
-def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str = "all", raw: bool = False) -> str:
+def extract_pdf_to_markdown(
+    pdf_path: str,
+    output_path: str = None,
+    images: str = "all",
+    raw: bool = False,
+    render_vector_figures: bool = False,
+    vector_figure_dpi: int = VECTOR_FIGURE_DPI,
+) -> str:
     """Extract text, images, and tables from a PDF and convert to Markdown.
 
     images: "all" = extract without filtering (default),
@@ -669,6 +797,8 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str 
             "none" = skip all images
     raw: When True, faithfully reproduce the PDF — skip header/footer dedup
          and font-size-based heading detection. Useful for archival fidelity.
+    render_vector_figures: Rasterize large vector drawing regions as PNG assets.
+    vector_figure_dpi: DPI used for rendered vector figure PNGs.
     """
     try:
         doc = fitz.open(pdf_path)
@@ -712,6 +842,7 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str 
         img_dir = output_path.parent / rel_img_dir
 
     img_count = 0
+    image_manifest: list[dict[str, object]] = []
 
     for page_num, page in enumerate(doc, 1):
         page_img_count = 0
@@ -720,18 +851,30 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str 
             markdown_content += f"\n\n<!-- Page {page_num} -->\n\n"
 
         try:
-            tabs = page.find_tables()
+            table_finder = page.find_tables()
+            raw_tables = list(getattr(table_finder, "tables", table_finder))
         except Exception:
-            tabs = []
+            raw_tables = []
 
-        tab_rects = [fitz.Rect(t.bbox) for t in tabs]
+        accepted_tables = []
+        for tab in raw_tables:
+            if should_emit_pdf_table(tab):
+                accepted_tables.append(tab)
+            else:
+                rows, cols, nonempty, density, _ = table_shape_stats(tab)
+                print(
+                    f"  [SKIP] Ignored low-confidence table on P{page_num}: "
+                    f"{rows}x{cols}, nonempty={nonempty}, density={density:.2f}"
+                )
+
+        tab_rects = [fitz.Rect(t.bbox) for t in accepted_tables]
 
         page_elements = []
         image_rects: list[fitz.Rect] = []
 
-        for tab in tabs:
+        for tab in accepted_tables:
             page_elements.append({
-                "y0": tab.bbox[1],
+                **element_sort_fields(tab.bbox),
                 "type": 2,
                 "content": tab.to_markdown()
             })
@@ -802,6 +945,7 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str 
                         continue
 
                     line_text = merge_adjacent_formatting(line_text)
+                    line_text = normalize_emphasis_boundaries(line_text)
 
                     heading_level = get_heading_level(line_size, size_map, line_text, line_flags)
 
@@ -817,7 +961,7 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str 
                         final_text = line_text
 
                     page_elements.append({
-                        "y0": line["bbox"][1],
+                        **element_sort_fields(tuple(line["bbox"])),
                         "type": 0,
                         "content": final_text,
                         "is_heading": heading_level > 0,
@@ -832,7 +976,7 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str 
                     pass
                 elif images == "all" or should_keep_image(block, page.rect, seen_image_hashes):
                     page_elements.append({
-                        "y0": block["bbox"][1],
+                        **element_sort_fields(tuple(block["bbox"])),
                         "type": 1,
                         "asset_kind": "raster",
                         "content": block
@@ -842,7 +986,7 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str 
                     print(f"  [SKIP] Filtered small/decorative image: {w}x{h}px, {len(block.get('image', b''))} bytes")
 
         rendered_vector_rects: list[fitz.Rect] = []
-        if images != "none":
+        if images != "none" and render_vector_figures:
             for rect in detect_vector_figure_rects(page):
                 vector_rect = fitz.Rect(rect)
                 if not should_keep_vector_rect(
@@ -853,14 +997,20 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str 
                     filtered=(images == "filtered"),
                 ):
                     continue
+                if is_text_dominant_vector_rect(page, vector_rect):
+                    print(
+                        f"  [SKIP] Ignored text-dominant vector region on P{page_num}: "
+                        f"{vector_rect.width:.0f}x{vector_rect.height:.0f}"
+                    )
+                    continue
                 try:
-                    image_data = render_vector_rect(page, vector_rect)
+                    image_data = render_vector_rect(page, vector_rect, dpi=vector_figure_dpi)
                 except Exception as exc:
                     print(f"  [WARN] Failed to render vector drawing on P{page_num}: {exc}")
                     continue
 
                 page_elements.append({
-                    "y0": vector_rect.y0,
+                    **element_sort_fields(vector_rect),
                     "type": 1,
                     "asset_kind": "vector",
                     "content": {
@@ -873,7 +1023,7 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str 
 
         page_elements = remove_text_inside_vector_images(page_elements, rendered_vector_rects)
 
-        page_elements.sort(key=lambda x: x["y0"])
+        page_elements.sort(key=lambda x: (x["sort_y"], x["x0"]))
 
         # Merge adjacent same-level short headings
         page_elements = merge_adjacent_headings(page_elements)
@@ -891,7 +1041,7 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str 
                         break
                     if not should_merge_lines({"content": merged_content, "is_heading": False, "is_list": False}, next_el):
                         break
-                    merged_content += " " + next_el["content"]
+                    merged_content = join_wrapped_lines(merged_content, next_el["content"])
                     j += 1
                 merged_elements.append({
                     "type": 0,
@@ -980,6 +1130,33 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str 
                         if prev_was_list:
                             markdown_content += "\n"
                         markdown_content += f"![{image_name}]({rel_img_dir}/{image_name})\n\n"
+                        width = int(block.get("width", 0) or 0)
+                        height = int(block.get("height", 0) or 0)
+                        if asset_kind == "vector":
+                            bbox_rect = fitz.Rect(block.get("bbox", []))
+                            scale = vector_figure_dpi / 72
+                            width = int(round(bbox_rect.width * scale))
+                            height = int(round(bbox_rect.height * scale))
+                        ratio = width / height if width > 0 and height > 0 else None
+                        source_kind = "pdf_vector_figure" if asset_kind == "vector" else "pdf_image"
+                        image_manifest.append({
+                            "index": len(image_manifest) + 1,
+                            "filename": image_name,
+                            "original_filename": image_name,
+                            "asset_kind": "bitmap",
+                            "svg_renderable": True,
+                            "pptx_native_supported": True,
+                            "source_kind": source_kind,
+                            "source_ext": f".{ext}",
+                            "page_index": page_num,
+                            "occurrence_index": img_count + 1,
+                            "pixel_width": width or None,
+                            "pixel_height": height or None,
+                            "pixel_ratio": round(ratio, 6) if ratio else None,
+                            "display_ratio": round(ratio, 6) if ratio else None,
+                            "source_sha256": hashlib.sha256(image_data).hexdigest(),
+                            "bbox": list(block.get("bbox", [])),
+                        })
                         img_count += 1
                         prev_was_list = False
                         print(f"  [OK] Extracted {asset_kind} image: {image_name}")
@@ -1000,12 +1177,24 @@ def extract_pdf_to_markdown(pdf_path: str, output_path: str = None, images: str 
         os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(markdown_content)
+        if img_dir and image_manifest:
+            (img_dir / "image_manifest.json").write_text(
+                json.dumps(image_manifest, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
         print(f"[OK] Saved Markdown to: {output_path}")
 
     return markdown_content
 
 
-def process_directory(input_dir: str, output_dir: str | None = None, images: str = "all", raw: bool = False) -> int:
+def process_directory(
+    input_dir: str,
+    output_dir: str | None = None,
+    images: str = "all",
+    raw: bool = False,
+    render_vector_figures: bool = False,
+    vector_figure_dpi: int = VECTOR_FIGURE_DPI,
+) -> int:
     """Convert all PDFs in a directory to Markdown.
 
     Args:
@@ -1028,7 +1217,14 @@ def process_directory(input_dir: str, output_dir: str | None = None, images: str
     for pdf_file in pdf_files:
         output_file = output_path / (pdf_file.stem + '.md')
         print(f"Processing: {pdf_file.name}")
-        result = extract_pdf_to_markdown(str(pdf_file), str(output_file), images=images, raw=raw)
+        result = extract_pdf_to_markdown(
+            str(pdf_file),
+            str(output_file),
+            images=images,
+            raw=raw,
+            render_vector_figures=render_vector_figures,
+            vector_figure_dpi=vector_figure_dpi,
+        )
         if not result:
             failures += 1
 
@@ -1044,6 +1240,7 @@ def main() -> int:
 Examples:
   python3 pdf_to_md.py book.pdf                    # Convert a single file
   python3 pdf_to_md.py book.pdf -o output.md      # Specify output file
+  python3 pdf_to_md.py book.pdf --render-vector-figures
   python3 pdf_to_md.py ./pdfs                      # Convert all PDFs in directory
   python3 pdf_to_md.py ./pdfs -o ./markdown       # Specify output directory
 
@@ -1080,6 +1277,17 @@ Structure detection features:
         action='store_true',
         help='Faithful reproduction: skip header/footer dedup and heading detection',
     )
+    parser.add_argument(
+        '--render-vector-figures',
+        action='store_true',
+        help='Render large vector drawing regions as PNG figure assets',
+    )
+    parser.add_argument(
+        '--vector-figure-dpi',
+        type=int,
+        default=VECTOR_FIGURE_DPI,
+        help=f'DPI for --render-vector-figures output (default: {VECTOR_FIGURE_DPI})',
+    )
 
     args = parser.parse_args()
 
@@ -1097,10 +1305,24 @@ Structure detection features:
 
     if input_path.is_file():
         output = args.output or str(input_path.with_suffix('.md'))
-        result = extract_pdf_to_markdown(str(input_path), output, images=images, raw=args.raw)
+        result = extract_pdf_to_markdown(
+            str(input_path),
+            output,
+            images=images,
+            raw=args.raw,
+            render_vector_figures=args.render_vector_figures,
+            vector_figure_dpi=args.vector_figure_dpi,
+        )
         return 0 if result else 1
     elif input_path.is_dir():
-        failures = process_directory(str(input_path), args.output, images=images, raw=args.raw)
+        failures = process_directory(
+            str(input_path),
+            args.output,
+            images=images,
+            raw=args.raw,
+            render_vector_figures=args.render_vector_figures,
+            vector_figure_dpi=args.vector_figure_dpi,
+        )
         return 0 if failures == 0 else 1
     else:
         print(f"Error: File or directory not found: {args.input}")
