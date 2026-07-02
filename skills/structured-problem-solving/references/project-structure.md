@@ -2,16 +2,40 @@
 
 当用户的问题需要跨多轮推进、包含资料/调研/验证/交付产物，或用户明确要求“创建项目”时，在仓库内创建项目目录。简单一次性分析可以只在对话中完成，不必落盘。
 
+默认先创建最小框架，再按需扩展。不要为了“完整”预创建暂时用不到的阶段目录或状态文件。
+
+## 文件职责
+
+| 文件 | 职责 | 是否记录动态状态 |
+|---|---|---|
+| `README.md` | 给人看的项目入口和关键链接 | 少量，只写当前阶段和下一步 |
+| `AGENT.md` | 给 agent 的稳定规则、上下文入口和工作边界 | 否 |
+| `CLAUDE.md` | 指向 `AGENT.md`，避免两套规则 | 否 |
+| `brief.md` | 项目总控摘要，记录真实问题、资料状态、当前阶段、下一步 | 是 |
+| `decision-map.md` | 可选，复杂项目的路线唯一来源：已决事项、开放问题、迷雾 | 是 |
+
+动态状态只维护在 `brief.md` 和按需创建的 `decision-map.md`。`AGENT.md` 不记录当前阶段、资料状态或路线状态。
+
 ## 项目根目录
+
+### 最小框架
 
 ```text
 projects/<YYYYMMDD>-<project-name>/
 ├── README.md                # 给人看的项目概览和当前状态
-├── AGENT.md                 # 给 agent 看的项目上下文、规则和工作入口
+├── AGENT.md                 # 给 agent 看的稳定规则和工作入口
 ├── CLAUDE.md                # 指向 AGENT.md，避免两套规则不一致
-├── brief.md                 # 项目总览：问题、目标、当前阶段、决策日志
+├── brief.md                 # 项目总控摘要：真实问题、资料状态、当前阶段、下一步
 ├── 0-inputs/                # 原始输入：用户材料、访谈记录、数据、网页摘录、参考文档
 ├── 0-materials/             # 处理后资料：Markdown、摘要、证据表、来源索引
+└── 9-archive/               # 归档：废弃版本、旧假设、历史材料
+```
+
+### 按需扩展
+
+```text
+projects/<YYYYMMDD>-<project-name>/
+├── decision-map.md          # 复杂项目：路线图、已决事项、开放问题和迷雾
 ├── 1-problem-definition/    # 第 1 步：明确问题、范围、相关方、紧急程度
 ├── 2-problem-structuring/   # 第 2 步：MECE 逻辑树、鱼骨图、拆解备选方案
 ├── 3-prioritization/        # 第 3 步：80/20、重要性-紧急性、影响-难度排序
@@ -19,8 +43,7 @@ projects/<YYYYMMDD>-<project-name>/
 ├── 5-analysis/              # 第 5 步：数据分析、根因分析、假设验证
 ├── 6-synthesis/             # 第 6 步：综合建议、方案评估、方案选择
 ├── 7-communication/         # 第 7 步：方案呈现、故事线、汇报稿、可视化
-├── 8-prompts/               # 可选：最终 prompt、agent 任务说明、测试样例
-└── 9-archive/               # 归档：废弃版本、旧假设、历史材料
+└── 8-prompts/               # 可选：最终 prompt、agent 任务说明、测试样例
 ```
 
 ## 命名规则
@@ -28,10 +51,12 @@ projects/<YYYYMMDD>-<project-name>/
 - 所有项目都直接放在 `projects/` 下，不再按技能类型增加二级分类目录。
 - 目录名前缀使用创建日期 `YYYYMMDD`，例如 `20260630-新品类进入策略` 或 `20260630-market-entry-strategy`。
 - `<project-name>` 使用简短主题名；中文项目可直接用中文目录名，英文项目用小写连字符。
+- 阶段目录按需创建。只有当该阶段产生实质产物时，才创建对应目录。
 - 阶段文件使用编号前缀保持顺序，例如 `1-problem-definition/v1.md`、`2-problem-structuring/logic-tree-v1.md`。
 - 重要版本保留 `v1`、`v2`；不要覆盖已经用于决策的旧版本。
 - 原始资料只放入 `0-inputs/`；处理后资料放入 `0-materials/`；分析产物不要和原始资料混放。
 - `brief.md` 是项目唯一的总控文件，每次阶段推进后更新当前状态和下一步。
+- 当问题大到需要跨多轮拆解时，新增 `decision-map.md` 管理路线；不要在 `brief.md` 或 `AGENT.md` 中重复维护已决事项、开放问题和迷雾。
 - `README.md`、`AGENT.md`、`CLAUDE.md` 是每个项目根目录的必备文件。
 - `CLAUDE.md` 不复制规则，只指向 `AGENT.md`，避免两份说明不一致。
 
@@ -44,13 +69,14 @@ projects/<YYYYMMDD>-<project-name>/
 [用 2-3 句话说明这个项目要解决什么问题]
 
 ## 当前阶段
-[明确问题 / 分解问题 / 优先排序 / 工作计划 / 分析论证 / 综合建议 / 方案呈现 / 已完成]
+[术语统一 / 绘制路线图 / 明确问题 / 分解问题 / 优先排序 / 工作计划 / 分析论证 / 综合建议 / 方案呈现 / 已完成]
 
 ## 关键文件
 - `brief.md`：项目总控
+- `decision-map.md`：复杂项目路线图（如有）
 - `0-inputs/`：原始资料
 - `0-materials/`：处理后资料和证据
-- `1-problem-definition/` ~ `7-communication/`：七步法阶段产物
+- `1-problem-definition/` ~ `7-communication/`：按需创建的七步法阶段产物
 
 ## 下一步
 [一个最重要的下一步]
@@ -74,18 +100,10 @@ projects/<YYYYMMDD>-<project-name>/
 - 原始资料只放入 `0-inputs/`，处理后资料放入 `0-materials/`。
 - 不要把资料缺口伪装成结论。
 - 每次阶段推进后更新 `brief.md`。
-
-## 当前阶段
-[明确问题 / 分解问题 / 优先排序 / 工作计划 / 分析论证 / 综合建议 / 方案呈现 / 已完成]
-
-## 资料状态
-- 已获取：
-- 已处理：
-- 关键证据：
-- 资料缺口：
+- 如果存在 `decision-map.md`，它是路线状态的唯一来源。
 
 ## 下一步
-[一个最重要的下一步]
+先读取 `brief.md`。如果存在 `decision-map.md`，再读取它；否则按 `brief.md` 的当前阶段继续。
 ```
 
 ## `CLAUDE.md` 模板
@@ -104,7 +122,7 @@ projects/<YYYYMMDD>-<project-name>/
 # <项目名>
 
 ## 当前阶段
-[明确问题 / 分解问题 / 优先排序 / 工作计划 / 分析论证 / 综合建议 / 方案呈现 / 已完成]
+[术语统一 / 绘制路线图 / 明确问题 / 分解问题 / 优先排序 / 工作计划 / 分析论证 / 综合建议 / 方案呈现 / 已完成]
 
 ## 真实问题
 [一句话定义真正要解决的问题]
@@ -117,6 +135,8 @@ projects/<YYYYMMDD>-<project-name>/
 - 已转换/已整理：
 - 关键证据：
 - 资料缺口：
+- 术语表：`0-materials/domain-glossary.md`（如有）
+- 路线图：`decision-map.md`（如有）
 
 ## 成功标准
 - [可验证标准]
@@ -133,7 +153,7 @@ projects/<YYYYMMDD>-<project-name>/
 - 仍需验证：
 
 ## 决策日志
-- YYYY-MM-DD：[关键决定]
+- YYYY-MM-DD：[关键决定；复杂项目只写摘要，细节指向 `decision-map.md` 或阶段文件]
 
 ## 下一步
 [一个最重要的下一步]

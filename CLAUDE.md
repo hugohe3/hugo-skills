@@ -33,4 +33,4 @@ skills/<skill-name>/
 - **coordinate-converter** — 在 WGS84 / GCJ02（高德） / BD09（百度）坐标系之间批量换算经纬度，支持坐标列表与 CSV / TSV / GeoJSON / GPX / KML 文件原格式转换。
 - **learning-master** — 六阶段学习助手，用于系统化学习课程、书籍和文章。
 - **markdown-conversion** — 将 PDF / Word / Excel / PowerPoint / EPUB / HTML / 字幕 / URL 转换为 Markdown。
-- **structured-problem-solving** — 用麦肯锡七步问题解决法分析复杂问题，通过明确问题、MECE 拆解、优先排序、工作计划、分析论证、综合建议和方案呈现形成解决路径。
+- **structured-problem-solving** — 用麦肯锡七步问题解决法分析复杂问题，结合逐问澄清、术语统一、决策地图、MECE 拆解、优先排序、分析论证和方案呈现形成解决路径。
