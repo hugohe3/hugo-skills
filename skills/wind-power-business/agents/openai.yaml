@@ -1,0 +1,4 @@
+interface:
+  display_name: "风电 Cp 计算"
+  short_description: "根据功率曲线计算逐点 Cp 和最大功率系数"
+  default_prompt: "Use $wind-power-business to calculate Cp values from a wind turbine power curve."

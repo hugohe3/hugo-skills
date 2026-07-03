@@ -16,6 +16,7 @@
 | [learning-master](skills/learning-master/SKILL.md) | 六阶段学习助手，用于系统化学习课程、书籍和文章，生成学习计划、笔记、Anki 卡片和外化产出 |
 | [markdown-conversion](skills/markdown-conversion/SKILL.md) | 将 PDF / Word / Excel / PowerPoint / EPUB / HTML / 字幕 / 网页 URL 转换为干净的 Markdown，供 LLM 读取 |
 | [structured-problem-solving](skills/structured-problem-solving/SKILL.md) | 用麦肯锡七步问题解决法分析复杂问题，结合逐问澄清、术语统一、决策地图、MECE 拆解、优先排序、分析论证和方案呈现形成解决路径 |
+| [wind-power-business](skills/wind-power-business/SKILL.md) | 风电业务技能框架，当前支持根据功率曲线调用脚本计算 Cp 值、逐风速明细和最大功率系数 |
 
 ## 安装
 
@@ -49,6 +50,14 @@ pip install -r skills/image-local-replacer/resources/requirements.txt
 如果只使用不依赖脚本的纯文本流程，可以不安装 Python 依赖；一旦需要运行转换器、Anki 导出或图片局部替换脚本，就需要安装对应技能的 `requirements.txt`。
 
 `epub-translator` 的脚本只使用 Python 标准库，不需要安装第三方依赖。
+
+`wind-power-business` 当前的 Cp 计算脚本只使用 Python 标准库，不需要安装第三方依赖。
+
+如需生成 `wind-power-business` 的 Cp Excel 成果，需要安装：
+
+```bash
+pip install -r skills/wind-power-business/resources/requirements.txt
+```
 
 ### Option C — Skill marketplace
 
@@ -85,6 +94,7 @@ Claude Code 内也可以使用：
 /path/to/hugo-skills/skills/epub-translator/SKILL.md
 /path/to/hugo-skills/skills/image-local-replacer/SKILL.md
 /path/to/hugo-skills/skills/structured-problem-solving/SKILL.md
+/path/to/hugo-skills/skills/wind-power-business/SKILL.md
 ```
 
 ### Claude Code 手动配置
@@ -113,6 +123,10 @@ Claude Code 内也可以使用：
     {
       "type": "file",
       "path": "/path/to/hugo-skills/skills/structured-problem-solving/SKILL.md"
+    },
+    {
+      "type": "file",
+      "path": "/path/to/hugo-skills/skills/wind-power-business/SKILL.md"
     }
   ]
 }
@@ -126,9 +140,10 @@ claude skills add /path/to/hugo-skills/skills/learning-master/SKILL.md
 claude skills add /path/to/hugo-skills/skills/epub-translator/SKILL.md
 claude skills add /path/to/hugo-skills/skills/image-local-replacer/SKILL.md
 claude skills add /path/to/hugo-skills/skills/structured-problem-solving/SKILL.md
+claude skills add /path/to/hugo-skills/skills/wind-power-business/SKILL.md
 ```
 
-添加后，支持 skills 的 agent 会在你要求转换文档、管理系统化学习项目、处理图片局部替换或结构化分析问题时自动调用相应技能。
+添加后，支持 skills 的 agent 会在你要求转换文档、管理系统化学习项目、处理图片局部替换、结构化分析问题或处理风电业务任务时自动调用相应技能。
 
 ## 仓库结构
 
@@ -152,6 +167,13 @@ skills/
     resources/            # requirements.txt
   structured-problem-solving/
     SKILL.md              # 技能入口——agent 读取此文件
+    agents/               # UI 元数据
+  wind-power-business/
+    SKILL.md              # 技能入口——agent 读取此文件
+    assets/               # Cp 计算 Excel 模板
+    references/           # 已沉淀的风电业务模块参考
+    scripts/              # Cp 计算脚本
+    resources/            # Excel 输出依赖
     agents/               # UI 元数据
 ```
 

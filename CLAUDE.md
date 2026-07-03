@@ -34,3 +34,4 @@ skills/<skill-name>/
 - **learning-master** — 六阶段学习助手，用于系统化学习课程、书籍和文章。
 - **markdown-conversion** — 将 PDF / Word / Excel / PowerPoint / EPUB / HTML / 字幕 / URL 转换为 Markdown。
 - **structured-problem-solving** — 用麦肯锡七步问题解决法分析复杂问题，结合逐问澄清、术语统一、决策地图、MECE 拆解、优先排序、分析论证和方案呈现形成解决路径。
+- **wind-power-business** — 风电业务技能框架，当前支持根据功率曲线调用脚本计算 Cp 值、逐风速明细和最大功率系数。
