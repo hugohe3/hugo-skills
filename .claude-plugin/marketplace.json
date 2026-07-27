@@ -7,13 +7,13 @@
     "url": "https://github.com/hugohe3"
   },
   "metadata": {
-    "description": "Hugo's portable AI skills for document conversion, agent-native EPUB translation, structured problem solving, structured learning, and wind power business workflow frameworks"
+    "description": "Hugo's portable AI skills for Bilibili subtitles, document conversion, agent-native EPUB translation, structured problem solving, structured learning, and wind power business workflow frameworks"
   },
   "plugins": [
     {
       "name": "hugo-skills",
       "source": "./",
-      "description": "Portable AI skills for Markdown document conversion, agent-native EPUB translation, structured problem solving, six-stage structured learning, and wind power business workflow frameworks. Note: this plugin ships only the skill files; install each skill's Python dependencies from the installed location before running scripts.",
+      "description": "Portable AI skills for Bilibili subtitles, Markdown document conversion, agent-native EPUB translation, structured problem solving, six-stage structured learning, and wind power business workflow frameworks. Note: this plugin ships only the skill files; install each skill's Python dependencies from the installed location before running scripts.",
       "author": {
         "name": "Hugo He",
         "email": "heyug3@gmail.com",
@@ -25,6 +25,9 @@
       "keywords": [
         "ai",
         "skill",
+        "bilibili",
+        "subtitles",
+        "srt",
         "markdown",
         "document-conversion",
         "epub",
@@ -38,6 +41,7 @@
       ],
       "strict": false,
       "skills": [
+        "./skills/bilibili-subtitles",
         "./skills/epub-translator",
         "./skills/learning-master",
         "./skills/markdown-conversion",

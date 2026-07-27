@@ -10,6 +10,7 @@
 
 | 技能 | 说明 |
 |---|---|
+| [bilibili-subtitles](skills/bilibili-subtitles/SKILL.md) | 批量获取 Bilibili 单个视频、多个 BV 号或指定 UP 主的公开字幕轨道，导出为 SRT 并保存到 PPT Master 的 projects 目录 |
 | [coordinate-converter](skills/coordinate-converter/SKILL.md) | 在 WGS84 / GCJ02（高德） / BD09（百度）坐标系之间批量换算经纬度，支持单点、坐标列表，以及 CSV / TSV / GeoJSON / GPX / KML 文件原格式转换 |
 | [epub-translator](skills/epub-translator/SKILL.md) | 使用当前 agent 模型将英文 EPUB 翻译为简体中文 EPUB，并保留目录、图片、样式和阅读顺序 |
 | [image-local-replacer](skills/image-local-replacer/SKILL.md) | 对 PNG/JPG/WebP 位图做小范围局部覆盖、修补或文字重写，保持原图尺寸和未选中区域不变 |
@@ -36,6 +37,9 @@ cd hugo-skills
 之后按需安装对应技能的依赖：
 
 ```bash
+# bilibili-subtitles：官方二维码登录
+pip install -r skills/bilibili-subtitles/resources/requirements.txt
+
 # learning-master：Anki TSV 导出
 pip install -r skills/learning-master/resources/requirements.txt
 
@@ -89,6 +93,7 @@ Claude Code 内也可以使用：
 常用入口：
 
 ```text
+/path/to/hugo-skills/skills/bilibili-subtitles/SKILL.md
 /path/to/hugo-skills/skills/markdown-conversion/SKILL.md
 /path/to/hugo-skills/skills/learning-master/SKILL.md
 /path/to/hugo-skills/skills/epub-translator/SKILL.md
@@ -104,6 +109,10 @@ Claude Code 内也可以使用：
 ```json
 {
   "skills": [
+    {
+      "type": "file",
+      "path": "/path/to/hugo-skills/skills/bilibili-subtitles/SKILL.md"
+    },
     {
       "type": "file",
       "path": "/path/to/hugo-skills/skills/markdown-conversion/SKILL.md"
@@ -135,6 +144,7 @@ Claude Code 内也可以使用：
 也可以通过 Claude Code CLI 添加本地技能：
 
 ```bash
+claude skills add /path/to/hugo-skills/skills/bilibili-subtitles/SKILL.md
 claude skills add /path/to/hugo-skills/skills/markdown-conversion/SKILL.md
 claude skills add /path/to/hugo-skills/skills/learning-master/SKILL.md
 claude skills add /path/to/hugo-skills/skills/epub-translator/SKILL.md
@@ -143,12 +153,16 @@ claude skills add /path/to/hugo-skills/skills/structured-problem-solving/SKILL.m
 claude skills add /path/to/hugo-skills/skills/wind-power-business/SKILL.md
 ```
 
-添加后，支持 skills 的 agent 会在你要求转换文档、管理系统化学习项目、处理图片局部替换、结构化分析问题或处理风电业务任务时自动调用相应技能。
+添加后，支持 skills 的 agent 会在你要求获取 Bilibili 字幕、转换文档、管理系统化学习项目、处理图片局部替换、结构化分析问题或处理风电业务任务时自动调用相应技能。
 
 ## 仓库结构
 
 ```
 skills/
+  bilibili-subtitles/
+    SKILL.md              # 技能入口——agent 读取此文件
+    scripts/              # Bilibili 视频清单与字幕下载脚本
+    resources/            # 二维码生成依赖
   learning-master/
     SKILL.md              # 技能入口——agent 读取此文件
     scripts/              # Anki 卡片导出脚本

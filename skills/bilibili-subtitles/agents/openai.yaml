@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bilibili 字幕"
+  short_description: "批量获取 Bilibili 视频或 UP 主空间字幕并导出 SRT 文件"
+  default_prompt: "使用 $bilibili-subtitles 获取指定 B 站 UP 主的全部公开视频字幕，并保存到 PPT Master projects。"
