@@ -1,0 +1,4 @@
+interface:
+  display_name: "地理空间数据转换"
+  short_description: "统一转换坐标、SHP、KML 与 DWG，并处理图片地面叠加"
+  default_prompt: "使用 $geospatial-converter 转换这个地理空间文件，或将截图叠加到 KML 面上。"

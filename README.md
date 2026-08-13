@@ -11,13 +11,15 @@
 | 技能 | 说明 |
 |---|---|
 | [bilibili-subtitles](skills/bilibili-subtitles/SKILL.md) | 批量获取 Bilibili 单个视频、多个 BV 号或指定 UP 主的公开字幕轨道，导出为 SRT 并保存到 PPT Master 的 projects 目录 |
-| [coordinate-converter](skills/coordinate-converter/SKILL.md) | 在 WGS84 / GCJ02（高德） / BD09（百度）坐标系之间批量换算经纬度，支持单点、坐标列表，以及 CSV / TSV / GeoJSON / GPX / KML 文件原格式转换 |
+| [geospatial-converter](skills/geospatial-converter/SKILL.md) | 统一处理坐标换算、XLSX/CSV 生成 Shapefile、SHP 导出 DXF/DWG、ODA 回转验证、截图叠加 KML 面，以及地方独立坐标系的安全识别 |
 | [epub-translator](skills/epub-translator/SKILL.md) | 使用当前 agent 模型将英文 EPUB 翻译为简体中文 EPUB，并保留目录、图片、样式和阅读顺序 |
 | [image-local-replacer](skills/image-local-replacer/SKILL.md) | 对 PNG/JPG/WebP 位图做小范围局部覆盖、修补或文字重写，保持原图尺寸和未选中区域不变 |
 | [learning-master](skills/learning-master/SKILL.md) | 六阶段学习助手，用于系统化学习课程、书籍和文章，生成学习计划、笔记、Anki 卡片和外化产出 |
 | [markdown-conversion](skills/markdown-conversion/SKILL.md) | 将 PDF / Word / Excel / PowerPoint / EPUB / HTML / 字幕 / 网页 URL 转换为干净的 Markdown，供 LLM 读取 |
 | [structured-problem-solving](skills/structured-problem-solving/SKILL.md) | 用麦肯锡七步问题解决法分析复杂问题，结合逐问澄清、术语统一、决策地图、MECE 拆解、优先排序、分析论证和方案呈现形成解决路径 |
 | [wind-power-business](skills/wind-power-business/SKILL.md) | 风电业务技能框架，当前支持根据功率曲线调用脚本计算 Cp 值、逐风速明细和最大功率系数 |
+
+迁移说明：原 `coordinate-converter` 已合并到 `geospatial-converter`。已有配置若直接引用 `skills/coordinate-converter/SKILL.md`，请更新为 `skills/geospatial-converter/SKILL.md`。
 
 ## 安装
 
@@ -49,6 +51,9 @@ pip install -r skills/markdown-conversion/resources/requirements.txt
 # image-local-replacer：图片局部替换
 pip install -r skills/image-local-replacer/resources/requirements.txt
 
+# geospatial-converter：XLSX/CSV、Shapefile 与 CAD 转换
+pip install -r skills/geospatial-converter/resources/requirements.txt
+
 ```
 
 如果只使用不依赖脚本的纯文本流程，可以不安装 Python 依赖；一旦需要运行转换器、Anki 导出或图片局部替换脚本，就需要安装对应技能的 `requirements.txt`。
@@ -56,6 +61,8 @@ pip install -r skills/image-local-replacer/resources/requirements.txt
 `epub-translator` 的脚本只使用 Python 标准库，不需要安装第三方依赖。
 
 `wind-power-business` 当前的 Cp 计算脚本只使用 Python 标准库，不需要安装第三方依赖。
+
+`geospatial-converter` 生成可交付 DWG 时还需要单独安装 ODA File Converter；Python 依赖只负责表格、Shapefile 和标准 DXF 处理。
 
 如需生成 `wind-power-business` 的 Cp Excel 成果，需要安装：
 
@@ -98,6 +105,7 @@ Claude Code 内也可以使用：
 /path/to/hugo-skills/skills/learning-master/SKILL.md
 /path/to/hugo-skills/skills/epub-translator/SKILL.md
 /path/to/hugo-skills/skills/image-local-replacer/SKILL.md
+/path/to/hugo-skills/skills/geospatial-converter/SKILL.md
 /path/to/hugo-skills/skills/structured-problem-solving/SKILL.md
 /path/to/hugo-skills/skills/wind-power-business/SKILL.md
 ```
@@ -131,6 +139,10 @@ Claude Code 内也可以使用：
     },
     {
       "type": "file",
+      "path": "/path/to/hugo-skills/skills/geospatial-converter/SKILL.md"
+    },
+    {
+      "type": "file",
       "path": "/path/to/hugo-skills/skills/structured-problem-solving/SKILL.md"
     },
     {
@@ -149,11 +161,12 @@ claude skills add /path/to/hugo-skills/skills/markdown-conversion/SKILL.md
 claude skills add /path/to/hugo-skills/skills/learning-master/SKILL.md
 claude skills add /path/to/hugo-skills/skills/epub-translator/SKILL.md
 claude skills add /path/to/hugo-skills/skills/image-local-replacer/SKILL.md
+claude skills add /path/to/hugo-skills/skills/geospatial-converter/SKILL.md
 claude skills add /path/to/hugo-skills/skills/structured-problem-solving/SKILL.md
 claude skills add /path/to/hugo-skills/skills/wind-power-business/SKILL.md
 ```
 
-添加后，支持 skills 的 agent 会在你要求获取 Bilibili 字幕、转换文档、管理系统化学习项目、处理图片局部替换、结构化分析问题或处理风电业务任务时自动调用相应技能。
+添加后，支持 skills 的 agent 会在你要求获取 Bilibili 字幕、转换文档、管理系统化学习项目、处理图片局部替换、转换地理空间数据与 CAD、结构化分析问题或处理风电业务任务时自动调用相应技能。
 
 ## 仓库结构
 
@@ -179,6 +192,11 @@ skills/
     SKILL.md              # 技能入口——agent 读取此文件
     scripts/              # 位图局部替换脚本
     resources/            # requirements.txt
+  geospatial-converter/
+    SKILL.md              # 技能入口——agent 读取此文件
+    scripts/              # 坐标、表格、Shapefile、KML、DXF 与 DWG 转换器
+    references/           # 坐标系判断与 KML 图片叠加规则
+    resources/            # XLSX 与 Shapefile 处理依赖
   structured-problem-solving/
     SKILL.md              # 技能入口——agent 读取此文件
     agents/               # UI 元数据

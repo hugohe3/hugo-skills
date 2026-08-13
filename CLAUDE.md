@@ -31,7 +31,7 @@ skills/<skill-name>/
 ## 可用技能
 
 - **bilibili-subtitles** — 批量获取 Bilibili 视频或指定 UP 主的公开字幕轨道，导出为 SRT 并保存到 PPT Master 的 projects 目录。
-- **coordinate-converter** — 在 WGS84 / GCJ02（高德） / BD09（百度）坐标系之间批量换算经纬度，支持坐标列表与 CSV / TSV / GeoJSON / GPX / KML 文件原格式转换。
+- **geospatial-converter** — 统一处理坐标换算、XLSX/CSV 生成 Shapefile、SHP 导出 DXF/DWG、ODA 回转验证、截图叠加 KML 面，以及地方独立坐标系的安全识别。
 - **learning-master** — 六阶段学习助手，用于系统化学习课程、书籍和文章。
 - **markdown-conversion** — 将 PDF / Word / Excel / PowerPoint / EPUB / HTML / 字幕 / URL 转换为 Markdown。
 - **structured-problem-solving** — 用麦肯锡七步问题解决法分析复杂问题，结合逐问澄清、术语统一、决策地图、MECE 拆解、优先排序、分析论证和方案呈现形成解决路径。

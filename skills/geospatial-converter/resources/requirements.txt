@@ -1,0 +1,5 @@
+ezdxf>=1,<2
+openpyxl>=3,<4
+Pillow>=12,<13
+pyproj>=3,<4
+pyshp>=2,<3
