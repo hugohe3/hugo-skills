@@ -3,4 +3,4 @@
 # Install:
 #     pip install -r resources/requirements.txt
 
-pillow>=10,<12
+pillow>=10,<13
