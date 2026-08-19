@@ -206,5 +206,5 @@ python3 scripts/check_env.py
 - 图片 manifest → `<输入目录>/<文件名>_files/image_manifest.json`（后端支持且存在图片时生成）
 - 网页图片来源 → `<输入目录>/<文件名>_files/image_sources.json`（网页后端下载图片时生成，授权状态默认 `unknown`）
 - 转换 profile → `<stem>.conversion_profile.json`（记录本次转换产物和结构统计）
-- URL → 当前工作目录（除非指定 `-o`）；经 MinerU 处理的 PDF URL 使用 MinerU 的输出目录行为
+- URL → 当前项目的 `projects/`（除非指定 `-o`）；经 MinerU 处理的 PDF URL 使用 MinerU 的输出目录行为
 - 已是 Markdown / 纯文本的输入直接输出（或复制）不做转换
