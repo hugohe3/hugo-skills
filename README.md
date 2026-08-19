@@ -11,6 +11,7 @@
 | 技能 | 说明 |
 |---|---|
 | [bilibili-subtitles](skills/bilibili-subtitles/SKILL.md) | 批量获取 Bilibili 单个视频、多个 BV 号或指定 UP 主的公开字幕轨道，导出为 SRT 并保存到 PPT Master 的 projects 目录 |
+| [diagram-creator](skills/diagram-creator/SKILL.md) | 创建和编辑 Draw.io、Excalidraw、Mermaid、PlantUML、Graphviz、D2、BPMN、Structurizr、GraphML 与 SVG 图表源文件 |
 | [geospatial-converter](skills/geospatial-converter/SKILL.md) | 统一处理坐标换算、XLSX/CSV 生成 Shapefile、SHP 导出 DXF/DWG、ODA 回转验证、截图叠加 KML 面，以及地方独立坐标系的安全识别 |
 | [epub-translator](skills/epub-translator/SKILL.md) | 使用当前 agent 模型将英文 EPUB 翻译为简体中文 EPUB，并保留目录、图片、样式和阅读顺序 |
 | [image-local-replacer](skills/image-local-replacer/SKILL.md) | 对 PNG/JPG/WebP 位图做小范围局部覆盖、修补或文字重写，保持原图尺寸和未选中区域不变 |
@@ -58,6 +59,8 @@ pip install -r skills/geospatial-converter/resources/requirements.txt
 
 如果只使用不依赖脚本的纯文本流程，可以不安装 Python 依赖；一旦需要运行转换器、Anki 导出或图片局部替换脚本，就需要安装对应技能的 `requirements.txt`。
 
+`diagram-creator` 的格式校验脚本只使用 Python 标准库，不需要安装第三方依赖。
+
 `epub-translator` 的脚本只使用 Python 标准库，不需要安装第三方依赖。
 
 `wind-power-business` 当前的 Cp 计算脚本只使用 Python 标准库，不需要安装第三方依赖。
@@ -101,6 +104,7 @@ Claude Code 内也可以使用：
 
 ```text
 /path/to/hugo-skills/skills/bilibili-subtitles/SKILL.md
+/path/to/hugo-skills/skills/diagram-creator/SKILL.md
 /path/to/hugo-skills/skills/markdown-conversion/SKILL.md
 /path/to/hugo-skills/skills/learning-master/SKILL.md
 /path/to/hugo-skills/skills/epub-translator/SKILL.md
@@ -120,6 +124,10 @@ Claude Code 内也可以使用：
     {
       "type": "file",
       "path": "/path/to/hugo-skills/skills/bilibili-subtitles/SKILL.md"
+    },
+    {
+      "type": "file",
+      "path": "/path/to/hugo-skills/skills/diagram-creator/SKILL.md"
     },
     {
       "type": "file",
@@ -157,6 +165,7 @@ Claude Code 内也可以使用：
 
 ```bash
 claude skills add /path/to/hugo-skills/skills/bilibili-subtitles/SKILL.md
+claude skills add /path/to/hugo-skills/skills/diagram-creator/SKILL.md
 claude skills add /path/to/hugo-skills/skills/markdown-conversion/SKILL.md
 claude skills add /path/to/hugo-skills/skills/learning-master/SKILL.md
 claude skills add /path/to/hugo-skills/skills/epub-translator/SKILL.md
@@ -166,7 +175,7 @@ claude skills add /path/to/hugo-skills/skills/structured-problem-solving/SKILL.m
 claude skills add /path/to/hugo-skills/skills/wind-power-business/SKILL.md
 ```
 
-添加后，支持 skills 的 agent 会在你要求获取 Bilibili 字幕、转换文档、管理系统化学习项目、处理图片局部替换、转换地理空间数据与 CAD、结构化分析问题或处理风电业务任务时自动调用相应技能。
+添加后，支持 skills 的 agent 会在你要求获取 Bilibili 字幕、创作可编辑图表、转换文档、管理系统化学习项目、处理图片局部替换、转换地理空间数据与 CAD、结构化分析问题或处理风电业务任务时自动调用相应技能。
 
 ## 仓库结构
 
@@ -176,6 +185,10 @@ skills/
     SKILL.md              # 技能入口——agent 读取此文件
     scripts/              # Bilibili 视频清单与字幕下载脚本
     resources/            # 二维码生成依赖
+  diagram-creator/
+    SKILL.md              # 技能入口——agent 读取此文件
+    references/           # 十种图表后端的格式与建模规则
+    scripts/              # 多格式图表源文件离线校验器
   learning-master/
     SKILL.md              # 技能入口——agent 读取此文件
     scripts/              # Anki 卡片导出脚本

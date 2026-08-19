@@ -7,13 +7,13 @@
     "url": "https://github.com/hugohe3"
   },
   "metadata": {
-    "description": "Hugo's portable AI skills for Bilibili subtitles, document and geospatial conversion, agent-native EPUB translation, structured problem solving, structured learning, and wind power business workflow frameworks"
+    "description": "Hugo's portable AI skills for Bilibili subtitles, editable diagram creation, document and geospatial conversion, agent-native EPUB translation, structured problem solving, structured learning, and wind power business workflow frameworks"
   },
   "plugins": [
     {
       "name": "hugo-skills",
       "source": "./",
-      "description": "Portable AI skills for Bilibili subtitles, Markdown document conversion, geospatial and CAD conversion, agent-native EPUB translation, structured problem solving, six-stage structured learning, and wind power business workflow frameworks. Note: this plugin ships only the skill files; install each skill's Python dependencies from the installed location before running scripts.",
+      "description": "Portable AI skills for Bilibili subtitles, multi-format editable diagrams and diagram-as-code, Markdown document conversion, geospatial and CAD conversion, agent-native EPUB translation, structured problem solving, six-stage structured learning, and wind power business workflow frameworks. Note: this plugin ships only the skill files; install each skill's Python dependencies from the installed location before running scripts.",
       "author": {
         "name": "Hugo He",
         "email": "heyug3@gmail.com",
@@ -28,6 +28,17 @@
         "bilibili",
         "subtitles",
         "srt",
+        "diagram",
+        "drawio",
+        "excalidraw",
+        "mermaid",
+        "plantuml",
+        "graphviz",
+        "d2",
+        "bpmn",
+        "structurizr",
+        "graphml",
+        "svg",
         "markdown",
         "document-conversion",
         "geospatial",
@@ -51,6 +62,7 @@
       "strict": false,
       "skills": [
         "./skills/bilibili-subtitles",
+        "./skills/diagram-creator",
         "./skills/epub-translator",
         "./skills/geospatial-converter",
         "./skills/learning-master",

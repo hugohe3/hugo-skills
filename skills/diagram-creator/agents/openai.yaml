@@ -1,0 +1,4 @@
+interface:
+  display_name: "图表创作"
+  short_description: "创建和编辑多种原生图表及 diagram-as-code 格式"
+  default_prompt: "使用 $diagram-creator 为这段内容选择合适格式，并生成可继续编辑的图表源文件。"

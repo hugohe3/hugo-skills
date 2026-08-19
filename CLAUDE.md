@@ -31,6 +31,7 @@ skills/<skill-name>/
 ## 可用技能
 
 - **bilibili-subtitles** — 批量获取 Bilibili 视频或指定 UP 主的公开字幕轨道，导出为 SRT 并保存到 PPT Master 的 projects 目录。
+- **diagram-creator** — 创建和编辑可继续修改的多格式图表源文件，支持 Draw.io、Excalidraw、Mermaid、PlantUML、Graphviz、D2、BPMN、Structurizr、GraphML 与 SVG。
 - **geospatial-converter** — 统一处理坐标换算、XLSX/CSV 生成 Shapefile、SHP 导出 DXF/DWG、ODA 回转验证、截图叠加 KML 面，以及地方独立坐标系的安全识别。
 - **learning-master** — 六阶段学习助手，用于系统化学习课程、书籍和文章。
 - **markdown-conversion** — 将 PDF / Word / Excel / PowerPoint / EPUB / HTML / 字幕 / URL 转换为 Markdown。
