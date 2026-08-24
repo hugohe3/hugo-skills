@@ -7,13 +7,13 @@
     "url": "https://github.com/hugohe3"
   },
   "metadata": {
-    "description": "Hugo's portable AI skills for Bilibili subtitles, editable diagram creation, document and geospatial conversion, agent-native EPUB translation, structured problem solving, structured learning, and wind power business workflow frameworks"
+    "description": "Hugo's portable AI skills for Bilibili subtitles, editable diagram creation, document conversion, high-fidelity PDF transcription, geospatial conversion, agent-native EPUB translation, structured problem solving, structured learning, and wind power business workflow frameworks"
   },
   "plugins": [
     {
       "name": "hugo-skills",
       "source": "./",
-      "description": "Portable AI skills for Bilibili subtitles, multi-format editable diagrams and diagram-as-code, Markdown document conversion, geospatial and CAD conversion, agent-native EPUB translation, structured problem solving, six-stage structured learning, and wind power business workflow frameworks. Note: this plugin ships only the skill files; install each skill's Python dependencies from the installed location before running scripts.",
+      "description": "Portable AI skills for Bilibili subtitles, multi-format editable diagrams and diagram-as-code, Markdown document conversion, high-fidelity PDF transcription, geospatial and CAD conversion, agent-native EPUB translation, structured problem solving, six-stage structured learning, and wind power business workflow frameworks. Note: this plugin ships only the skill files; install each skill's Python dependencies from the installed location before running scripts.",
       "author": {
         "name": "Hugo He",
         "email": "heyug3@gmail.com",
@@ -41,6 +41,10 @@
         "svg",
         "markdown",
         "document-conversion",
+        "pdf",
+        "ocr",
+        "scanned-pdf",
+        "document-transcription",
         "geospatial",
         "shapefile",
         "dxf",
@@ -67,6 +71,7 @@
         "./skills/geospatial-converter",
         "./skills/learning-master",
         "./skills/markdown-conversion",
+        "./skills/pdf-transcription",
         "./skills/structured-problem-solving",
         "./skills/wind-power-business"
       ]

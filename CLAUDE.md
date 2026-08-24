@@ -46,5 +46,6 @@ skills/<skill-name>/
 - **geospatial-converter** — 统一处理坐标换算、XLSX/CSV 生成 Shapefile、SHP 导出 DXF/DWG、ODA 回转验证、截图叠加 KML 面，以及地方独立坐标系的安全识别。
 - **learning-master** — 六阶段学习助手，用于系统化学习课程、书籍和文章。
 - **markdown-conversion** — 将 PDF / Word / Excel / PowerPoint / EPUB / HTML / 字幕 / URL 转换为 Markdown。
+- **pdf-transcription** — 使用模型视觉理解将普通或影印 PDF 高保真转录为经过校核、可直接收录的结构化 Markdown。
 - **structured-problem-solving** — 用麦肯锡七步问题解决法分析复杂问题，结合逐问澄清、术语统一、决策地图、MECE 拆解、优先排序、分析论证和方案呈现形成解决路径。
 - **wind-power-business** — 风电业务技能框架，当前支持根据功率曲线调用脚本计算 Cp 值、逐风速明细和最大功率系数。

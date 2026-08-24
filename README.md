@@ -17,6 +17,7 @@
 | [image-local-replacer](skills/image-local-replacer/SKILL.md) | 对 PNG/JPG/WebP 位图做小范围局部覆盖、修补或文字重写，保持原图尺寸和未选中区域不变 |
 | [learning-master](skills/learning-master/SKILL.md) | 六阶段学习助手，用于系统化学习课程、书籍和文章，生成学习计划、笔记、Anki 卡片和外化产出 |
 | [markdown-conversion](skills/markdown-conversion/SKILL.md) | 将 PDF / Word / Excel / PowerPoint / EPUB / HTML / 字幕 / 网页 URL 转换为干净的 Markdown，供 LLM 读取 |
+| [pdf-transcription](skills/pdf-transcription/SKILL.md) | 使用模型视觉理解将普通或影印 PDF 高保真转录为经过校核、可直接收录的结构化 Markdown |
 | [structured-problem-solving](skills/structured-problem-solving/SKILL.md) | 用麦肯锡七步问题解决法分析复杂问题，结合逐问澄清、术语统一、决策地图、MECE 拆解、优先排序、分析论证和方案呈现形成解决路径 |
 | [wind-power-business](skills/wind-power-business/SKILL.md) | 风电业务技能框架，当前支持根据功率曲线调用脚本计算 Cp 值、逐风速明细和最大功率系数 |
 
@@ -106,6 +107,7 @@ Claude Code 内也可以使用：
 /path/to/hugo-skills/skills/bilibili-subtitles/SKILL.md
 /path/to/hugo-skills/skills/diagram-creator/SKILL.md
 /path/to/hugo-skills/skills/markdown-conversion/SKILL.md
+/path/to/hugo-skills/skills/pdf-transcription/SKILL.md
 /path/to/hugo-skills/skills/learning-master/SKILL.md
 /path/to/hugo-skills/skills/epub-translator/SKILL.md
 /path/to/hugo-skills/skills/image-local-replacer/SKILL.md
@@ -132,6 +134,10 @@ Claude Code 内也可以使用：
     {
       "type": "file",
       "path": "/path/to/hugo-skills/skills/markdown-conversion/SKILL.md"
+    },
+    {
+      "type": "file",
+      "path": "/path/to/hugo-skills/skills/pdf-transcription/SKILL.md"
     },
     {
       "type": "file",
@@ -167,6 +173,7 @@ Claude Code 内也可以使用：
 claude skills add /path/to/hugo-skills/skills/bilibili-subtitles/SKILL.md
 claude skills add /path/to/hugo-skills/skills/diagram-creator/SKILL.md
 claude skills add /path/to/hugo-skills/skills/markdown-conversion/SKILL.md
+claude skills add /path/to/hugo-skills/skills/pdf-transcription/SKILL.md
 claude skills add /path/to/hugo-skills/skills/learning-master/SKILL.md
 claude skills add /path/to/hugo-skills/skills/epub-translator/SKILL.md
 claude skills add /path/to/hugo-skills/skills/image-local-replacer/SKILL.md
@@ -175,7 +182,7 @@ claude skills add /path/to/hugo-skills/skills/structured-problem-solving/SKILL.m
 claude skills add /path/to/hugo-skills/skills/wind-power-business/SKILL.md
 ```
 
-添加后，支持 skills 的 agent 会在你要求获取 Bilibili 字幕、创作可编辑图表、转换文档、管理系统化学习项目、处理图片局部替换、转换地理空间数据与 CAD、结构化分析问题或处理风电业务任务时自动调用相应技能。
+添加后，支持 skills 的 agent 会在你要求获取 Bilibili 字幕、创作可编辑图表、转换文档、高保真转录 PDF、管理系统化学习项目、处理图片局部替换、转换地理空间数据与 CAD、结构化分析问题或处理风电业务任务时自动调用相应技能。
 
 ## 仓库结构
 
@@ -198,6 +205,9 @@ skills/
     SKILL.md              # 技能入口——agent 读取此文件
     scripts/              # Python 转换器（每种格式一个）
     resources/            # requirements.txt、config.example.json
+  pdf-transcription/
+    SKILL.md              # 普通与影印 PDF 高保真转录工作流
+    references/           # 转录排版规范与影印版识读细则
   epub-translator/
     SKILL.md              # 技能入口——agent 读取此文件
     scripts/              # EPUB 拆分与重打包脚本
