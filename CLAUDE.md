@@ -48,4 +48,5 @@ skills/<skill-name>/
 - **markdown-conversion** — 将 PDF / Word / Excel / PowerPoint / EPUB / HTML / 字幕 / URL 转换为 Markdown。
 - **pdf-transcription** — 使用模型视觉理解将普通或影印 PDF 高保真转录为经过校核、可直接收录的结构化 Markdown。
 - **structured-problem-solving** — 用麦肯锡七步问题解决法分析复杂问题，结合逐问澄清、术语统一、决策地图、MECE 拆解、优先排序、分析论证和方案呈现形成解决路径。
+- **wind-turbine-dwg-layout** — 将机位坐标 DWG 中的点位批量写入新底图，以风机示意图、25×25 方框和 `HD数字#` 编号组成标准 IB 风机布置。
 - **wind-power-business** — 风电业务技能框架，当前支持根据功率曲线调用脚本计算 Cp 值、逐风速明细和最大功率系数。

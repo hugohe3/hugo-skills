@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "source": "初步布置图1013.dwg",
+  "fj": {
+    "blockName": "fj",
+    "layer": "IB风机布置",
+    "entityCount": 24
+  },
+  "label": {
+    "templatePattern": "HD\\d+#",
+    "layer": "mainlayer",
+    "offset": [54.930329921, 44.42702298, -12.0]
+  },
+  "square": {
+    "layer": "mainlayer",
+    "size": 25.0,
+    "centerOffset": [-0.95937252947, -6.50781605625],
+    "elevation": 0.0981950000000325,
+    "colorIndex": 242,
+    "lineweight": 50,
+    "linetype": "Continuous",
+    "closed": false
+  }
+}

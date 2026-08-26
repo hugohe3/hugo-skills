@@ -19,6 +19,7 @@
 | [markdown-conversion](skills/markdown-conversion/SKILL.md) | 将 PDF / Word / Excel / PowerPoint / EPUB / HTML / 字幕 / 网页 URL 转换为干净的 Markdown，供 LLM 读取 |
 | [pdf-transcription](skills/pdf-transcription/SKILL.md) | 使用模型视觉理解将普通或影印 PDF 高保真转录为经过校核、可直接收录的结构化 Markdown |
 | [structured-problem-solving](skills/structured-problem-solving/SKILL.md) | 用麦肯锡七步问题解决法分析复杂问题，结合逐问澄清、术语统一、决策地图、MECE 拆解、优先排序、分析论证和方案呈现形成解决路径 |
+| [wind-turbine-dwg-layout](skills/wind-turbine-dwg-layout/SKILL.md) | 将机位坐标 DWG 中的点位批量写入新底图，以风机示意图、25×25 方框和 `HD数字#` 编号组成标准 IB 风机布置 |
 | [wind-power-business](skills/wind-power-business/SKILL.md) | 风电业务技能框架，当前支持根据功率曲线调用脚本计算 Cp 值、逐风速明细和最大功率系数 |
 
 迁移说明：原 `coordinate-converter` 已合并到 `geospatial-converter`。已有配置若直接引用 `skills/coordinate-converter/SKILL.md`，请更新为 `skills/geospatial-converter/SKILL.md`。
@@ -68,6 +69,8 @@ pip install -r skills/geospatial-converter/resources/requirements.txt
 
 `geospatial-converter` 生成可交付 DWG 时还需要单独安装 ODA File Converter；Python 依赖只负责表格、Shapefile 和标准 DXF 处理。
 
+`wind-turbine-dwg-layout` 不需要 Python 依赖，但仅支持 Windows，执行时需要已安装并打开 AutoCAD。
+
 如需生成 `wind-power-business` 的 Cp Excel 成果，需要安装：
 
 ```bash
@@ -113,6 +116,7 @@ Claude Code 内也可以使用：
 /path/to/hugo-skills/skills/image-local-replacer/SKILL.md
 /path/to/hugo-skills/skills/geospatial-converter/SKILL.md
 /path/to/hugo-skills/skills/structured-problem-solving/SKILL.md
+/path/to/hugo-skills/skills/wind-turbine-dwg-layout/SKILL.md
 /path/to/hugo-skills/skills/wind-power-business/SKILL.md
 ```
 
@@ -161,6 +165,10 @@ Claude Code 内也可以使用：
     },
     {
       "type": "file",
+      "path": "/path/to/hugo-skills/skills/wind-turbine-dwg-layout/SKILL.md"
+    },
+    {
+      "type": "file",
       "path": "/path/to/hugo-skills/skills/wind-power-business/SKILL.md"
     }
   ]
@@ -179,10 +187,11 @@ claude skills add /path/to/hugo-skills/skills/epub-translator/SKILL.md
 claude skills add /path/to/hugo-skills/skills/image-local-replacer/SKILL.md
 claude skills add /path/to/hugo-skills/skills/geospatial-converter/SKILL.md
 claude skills add /path/to/hugo-skills/skills/structured-problem-solving/SKILL.md
+claude skills add /path/to/hugo-skills/skills/wind-turbine-dwg-layout/SKILL.md
 claude skills add /path/to/hugo-skills/skills/wind-power-business/SKILL.md
 ```
 
-添加后，支持 skills 的 agent 会在你要求获取 Bilibili 字幕、创作可编辑图表、转换文档、高保真转录 PDF、管理系统化学习项目、处理图片局部替换、转换地理空间数据与 CAD、结构化分析问题或处理风电业务任务时自动调用相应技能。
+添加后，支持 skills 的 agent 会在你要求获取 Bilibili 字幕、创作可编辑图表、转换文档、高保真转录 PDF、管理系统化学习项目、处理图片局部替换、转换地理空间数据与 CAD、批量标注风机机位、结构化分析问题或处理风电业务任务时自动调用相应技能。
 
 ## 仓库结构
 
@@ -222,6 +231,11 @@ skills/
     resources/            # XLSX 与 Shapefile 处理依赖
   structured-problem-solving/
     SKILL.md              # 技能入口——agent 读取此文件
+    agents/               # UI 元数据
+  wind-turbine-dwg-layout/
+    SKILL.md              # IB 风机点位布置工作流与校验规则
+    assets/               # fj 图块、文字模板与固定样式参数
+    scripts/              # AutoCAD COM 批量布置脚本
     agents/               # UI 元数据
   wind-power-business/
     SKILL.md              # 技能入口——agent 读取此文件

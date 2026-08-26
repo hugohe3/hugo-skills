@@ -1,0 +1,4 @@
+interface:
+  display_name: "风机 DWG 点位布置"
+  short_description: "基于机位坐标DWG在新底图中批量生成标准IB风机图形与编号"
+  default_prompt: "Use $wind-turbine-dwg-layout to place labeled wind-turbine symbols from a coordinate DWG onto a new base DWG."
