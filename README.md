@@ -14,6 +14,7 @@
 | [diagram-creator](skills/diagram-creator/SKILL.md) | 创建和编辑 Draw.io、Excalidraw、Mermaid、PlantUML、Graphviz、D2、BPMN、Structurizr、GraphML 与 SVG 图表源文件 |
 | [geospatial-converter](skills/geospatial-converter/SKILL.md) | 统一处理坐标换算、XLSX/CSV 生成 Shapefile、SHP 导出 DXF/DWG、ODA 回转验证、截图叠加 KML 面，以及地方独立坐标系的安全识别 |
 | [epub-translator](skills/epub-translator/SKILL.md) | 使用当前 agent 模型将英文 EPUB 翻译为简体中文 EPUB，并保留目录、图片、样式和阅读顺序 |
+| [green-power-direct-connection](skills/green-power-direct-connection/SKILL.md) | 绿电直连（新能源就近消纳）申报方案的大纲框架、政策与资料来源，以及位置图、气候资源图、负荷与出力特性图、规模比选图和电力系统接线图的画法，附参考作图脚本 |
 | [image-local-replacer](skills/image-local-replacer/SKILL.md) | 对 PNG/JPG/WebP 位图做小范围局部覆盖、修补或文字重写，保持原图尺寸和未选中区域不变 |
 | [learning-master](skills/learning-master/SKILL.md) | 六阶段学习助手，用于系统化学习课程、书籍和文章，生成学习计划、笔记、Anki 卡片和外化产出 |
 | [markdown-conversion](skills/markdown-conversion/SKILL.md) | 将 PDF / Word / Excel / PowerPoint / EPUB / HTML / 字幕 / 网页 URL 转换为干净的 Markdown，供 LLM 读取 |
@@ -56,6 +57,9 @@ pip install -r skills/image-local-replacer/resources/requirements.txt
 
 # geospatial-converter：XLSX/CSV、Shapefile 与 CAD 转换
 pip install -r skills/geospatial-converter/resources/requirements.txt
+
+# green-power-direct-connection：绿电直连申报方案参考作图脚本
+pip install -r skills/green-power-direct-connection/resources/requirements.txt
 
 ```
 

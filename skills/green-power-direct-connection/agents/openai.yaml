@@ -1,0 +1,4 @@
+interface:
+  display_name: "绿电直连"
+  short_description: "绿电直连申报方案的大纲框架、资料来源与插图画法"
+  default_prompt: "使用 $green-power-direct-connection 帮我梳理绿电直连申报方案的大纲、需要收集的资料，并规划各章插图。"

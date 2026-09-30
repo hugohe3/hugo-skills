@@ -1,0 +1,74 @@
+{
+  "project": "示例绿电直连项目",
+  "pv_ac": 10.028,
+  "pv_dc": 12.1635,
+  "pv_rate_base": 12.1635,
+  "wind": 50,
+  "load_name": "负荷",
+  "load_rated": 27,
+  "load_max_ratio": 1.0,
+  "load_min_ratio": 0.7763,
+  "bess_power": 6,
+  "bess_energy": 12,
+  "typical_days": {
+    "summer_clear": "06-15",
+    "winter_clear": "12-12",
+    "summer_cloudy": "06-25"
+  },
+  "typical_day_names": {
+    "summer_clear": "夏季大出力日",
+    "winter_clear": "冬季大出力日",
+    "summer_cloudy": "夏季小出力日"
+  },
+  "op_typical_days": [
+    "summer_clear",
+    "summer_cloudy"
+  ],
+  "schemes": {
+    "scale_col": "wind",
+    "scale_label": "风电装机（万kW）",
+    "recommended": {
+      "pv": 10.028,
+      "wind": 50,
+      "bess_ratio": 0.1,
+      "bess_hours": 2
+    }
+  },
+  "figures": {
+    "3.2-3": false,
+    "3.3-1": false,
+    "4.1-6": {
+      "title": "代表月日内平均出力"
+    }
+  },
+  "diagram": {
+    "booster": "220 kV\n新能源升压站",
+    "load_sub": "220 kV\n负荷侧变电站",
+    "circuits": 1,
+    "line_top": "220 kV 直连专线 1 回",
+    "line_bottom": "约 70 km",
+    "load": "用电负荷\n270 MW",
+    "grid": {
+      "label": "公共电网",
+      "link": "关口计量 / 防逆流\n物理分界点"
+    },
+    "footnote": "一体化调控平台统一调度源、储、荷；负荷缺额由公共电网补充，项目不向公共电网反送电",
+    "sources": [
+      {
+        "kind": "pv",
+        "label": "光伏发电单元\n交流侧 10.028 万 kW",
+        "link": "35 kV"
+      },
+      {
+        "kind": "wind",
+        "label": "风力发电单元\n50 万 kW",
+        "link": "35 kV"
+      },
+      {
+        "kind": "bess",
+        "label": "电化学储能\n60 MW / 120 MWh",
+        "link": "35 kV"
+      }
+    ]
+  }
+}
