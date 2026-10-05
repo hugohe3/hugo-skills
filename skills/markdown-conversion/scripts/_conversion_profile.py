@@ -1,21 +1,41 @@
-"""Shared output profiling helpers for markdown-conversion scripts."""
+#!/usr/bin/env python3
+"""
+Markdown Conversion Profile Helpers
+
+Write lightweight sidecar metadata for source_to_md conversion outputs.
+
+Usage:
+    Imported by scripts/source_to_md/*.py
+
+Examples:
+    write_conversion_profile(input_path="demo.pdf", markdown_path="demo.md", ...)
+
+Dependencies:
+    None
+"""
 
 from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
 
 IMAGE_MANIFEST_NAME = "image_manifest.json"
-CONVERSION_PROFILE_SUFFIX = ".conversion_profile.json"
-SOURCE_PROFILE_NAME = "source_profile.json"
+PROFILE_SCHEMA = "markdown-conversion.conversion_profile.v1"
+PROFILE_SUFFIX = ".conversion_profile.json"
 
 
 def default_asset_dir(markdown_path: Path) -> Path:
-    """Return the conventional companion asset directory for a Markdown file."""
+    """Return the conventional companion asset directory for one Markdown output."""
     return markdown_path.parent / f"{markdown_path.stem}_files"
+
+
+def profile_path_for(markdown_path: Path) -> Path:
+    """Return the sidecar profile path for one Markdown output."""
+    return markdown_path.with_name(f"{markdown_path.stem}{PROFILE_SUFFIX}")
 
 
 def _display_path(path: Path | None, root: Path) -> str:
@@ -30,24 +50,25 @@ def _display_path(path: Path | None, root: Path) -> str:
 def _count_tables(lines: list[str]) -> int:
     count = 0
     in_table = False
+    separator_re = re.compile(
+        r"^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$"
+    )
     for line in lines:
         stripped = line.strip()
         is_table_line = stripped.startswith("|") and stripped.endswith("|")
-        has_separator = bool(
-            re.match(r"^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$", stripped)
-        )
+        has_separator = bool(separator_re.match(stripped))
         if is_table_line or has_separator:
             if not in_table:
                 count += 1
                 in_table = True
-        else:
-            in_table = False
+            continue
+        in_table = False
     return count
 
 
 def markdown_stats(markdown_path: Path) -> dict[str, int]:
-    """Return lightweight Markdown structure counts."""
-    if not markdown_path.exists():
+    """Return low-cost Markdown structure counts for inspection/debugging."""
+    if not markdown_path.is_file():
         return {
             "line_count": 0,
             "char_count": 0,
@@ -56,6 +77,7 @@ def markdown_stats(markdown_path: Path) -> dict[str, int]:
             "image_ref_count": 0,
             "link_count": 0,
         }
+
     text = markdown_path.read_text(encoding="utf-8", errors="replace")
     lines = text.splitlines()
     return {
@@ -68,115 +90,172 @@ def markdown_stats(markdown_path: Path) -> dict[str, int]:
     }
 
 
-def read_json(path: Path) -> Any:
+def _read_json(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
 
 
-def profile_path_for(markdown_path: str | Path) -> Path:
-    """Return the per-Markdown conversion profile path."""
-    markdown = Path(markdown_path)
-    return markdown.with_suffix(CONVERSION_PROFILE_SUFFIX)
+def _image_count_from_manifest(path: Path) -> int:
+    payload = _read_json(path)
+    if isinstance(payload, list):
+        return len(payload)
+    if isinstance(payload, dict):
+        items = payload.get("items")
+        if isinstance(items, list):
+            return len(items)
+    return 0
 
 
-def build_source_profile(
+def build_conversion_profile(
     *,
     input_path: str,
-    markdown_path: str,
+    markdown_path: str | Path,
     converter: str,
     conversion_type: str,
-    asset_dir: str | None = None,
+    asset_dir: str | Path | None = None,
     warnings: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Build a machine-readable profile for one converted source."""
+    """Build a sidecar profile without changing the Markdown conversion result."""
     markdown = Path(markdown_path)
     root = markdown.parent
     is_url = input_path.startswith(("http://", "https://"))
-    source = Path(input_path) if not is_url else None
+    source = None if is_url else Path(input_path)
     assets = Path(asset_dir) if asset_dir else default_asset_dir(markdown)
     image_manifest = assets / IMAGE_MANIFEST_NAME
-    manifest_payload = read_json(image_manifest)
-    image_count = 0
-    if isinstance(manifest_payload, list):
-        image_count = len(manifest_payload)
-    elif isinstance(manifest_payload, dict):
-        items = manifest_payload.get("items")
-        image_count = len(items) if isinstance(items, list) else 0
-
     source_exists = bool(source and source.exists())
-    profile = {
-        "schema": "markdown-conversion.conversion_profile.v1",
+
+    return {
+        "schema": PROFILE_SCHEMA,
         "converter": converter,
         "conversion_type": conversion_type,
         "source": {
             "path": input_path if is_url else _display_path(source, root),
-            "name": input_path if is_url else (source.name if source and source.name else input_path),
+            "name": input_path if is_url else (source.name if source else input_path),
             "suffix": "" if is_url else (source.suffix.lower() if source else ""),
             "kind": "url" if is_url else "file",
             "exists": source_exists,
-            "size_bytes": source.stat().st_size if source_exists and source and source.is_file() else None,
+            "size_bytes": (
+                source.stat().st_size
+                if source_exists and source is not None and source.is_file()
+                else None
+            ),
         },
         "outputs": {
             "markdown": _display_path(markdown, root),
-            "asset_dir": _display_path(assets, root) if assets.exists() else "",
-            "image_manifest": _display_path(image_manifest, root) if image_manifest.exists() else "",
-            "image_count": image_count,
+            "asset_dir": _display_path(assets, root) if assets.is_dir() else "",
+            "image_manifest": (
+                _display_path(image_manifest, root) if image_manifest.is_file() else ""
+            ),
+            "image_count": _image_count_from_manifest(image_manifest),
         },
         "markdown": markdown_stats(markdown),
         "warnings": warnings or [],
     }
-    return profile
 
 
-def write_source_profile(
+def write_conversion_profile(
     *,
     input_path: str,
-    markdown_path: str,
+    markdown_path: str | Path,
     converter: str,
     conversion_type: str,
-    asset_dir: str | None = None,
+    asset_dir: str | Path | None = None,
     warnings: list[str] | None = None,
 ) -> Path:
-    """Write a per-Markdown conversion profile beside the output."""
+    """Write `<stem>.conversion_profile.json` beside one Markdown output."""
     markdown = Path(markdown_path)
     profile_path = profile_path_for(markdown)
-    profile = build_source_profile(
+    profile = build_conversion_profile(
         input_path=input_path,
-        markdown_path=markdown_path,
+        markdown_path=markdown,
         converter=converter,
         conversion_type=conversion_type,
         asset_dir=asset_dir,
         warnings=warnings,
     )
-    profile_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    profile_path.write_text(
+        json.dumps(profile, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     return profile_path
+
+
+def record_source_url(markdown_path: str | Path, url: str) -> None:
+    """Add the fetched URL to a profile written for a downloaded document."""
+    profile_path = profile_path_for(Path(markdown_path))
+    profile = _read_json(profile_path)
+    if not isinstance(profile, dict) or not isinstance(profile.get("source"), dict):
+        return
+    profile["source"]["url"] = url
+    profile_path.write_text(
+        json.dumps(profile, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def write_conversion_profile_best_effort(
+    *,
+    input_path: str,
+    markdown_path: str | Path,
+    converter: str,
+    conversion_type: str,
+    asset_dir: str | Path | None = None,
+    warnings: list[str] | None = None,
+) -> Path | None:
+    """Write a profile sidecar, warning without changing converter success."""
+    try:
+        return write_conversion_profile(
+            input_path=input_path,
+            markdown_path=markdown_path,
+            converter=converter,
+            conversion_type=conversion_type,
+            asset_dir=asset_dir,
+            warnings=warnings,
+        )
+    except OSError as exc:
+        print(f"[WARN] Could not write conversion profile: {exc}", file=sys.stderr)
+        return None
 
 
 def build_result_payload(
     *,
     input_path: str,
-    markdown_path: str,
+    markdown_path: str | Path,
     converter: str,
     conversion_type: str,
-    asset_dir: str | None = None,
-    source_profile: str | None = None,
+    asset_dir: str | Path | None = None,
+    profile_path: str | Path | None = None,
+    source_profile: str | Path | None = None,
     warnings: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Return a compact JSON result for CLI consumers."""
+    """Return a compact JSON payload for CLI consumers."""
     markdown = Path(markdown_path)
     assets = Path(asset_dir) if asset_dir else default_asset_dir(markdown)
     image_manifest = assets / IMAGE_MANIFEST_NAME
-    profile = str(Path(source_profile).resolve()) if source_profile else ""
+    profile_path = profile_path or source_profile
+    profile = Path(profile_path) if profile_path else profile_path_for(markdown)
     return {
-        "input": str(Path(input_path).resolve()) if not input_path.startswith(("http://", "https://")) else input_path,
+        "input": (
+            input_path
+            if input_path.startswith(("http://", "https://"))
+            else str(Path(input_path).resolve())
+        ),
         "markdown": str(markdown.resolve()),
-        "asset_dir": str(assets.resolve()) if assets.exists() else "",
-        "image_manifest": str(image_manifest.resolve()) if image_manifest.exists() else "",
-        "conversion_profile": profile,
-        "source_profile": profile,
+        "asset_dir": str(assets.resolve()) if assets.is_dir() else "",
+        "image_manifest": str(image_manifest.resolve()) if image_manifest.is_file() else "",
+        "conversion_profile": str(profile.resolve()) if profile.is_file() else "",
+        "source_profile": str(profile.resolve()) if profile.is_file() else "",
+        "warnings": warnings or [],
         "converter": converter,
         "conversion_type": conversion_type,
-        "warnings": warnings or [],
     }
+
+
+# Compatibility names for the standalone entry, MinerU and subtitles.
+write_source_profile = write_conversion_profile
+build_source_profile = build_conversion_profile
+read_json = _read_json
+CONVERSION_PROFILE_SUFFIX = PROFILE_SUFFIX
+SOURCE_PROFILE_NAME = 'source_profile.json'

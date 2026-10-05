@@ -320,11 +320,11 @@ def dispatch_single(
     rc = run_python_script(route.script_name, script_args)
     if rc != 0:
         return rc
-        if out_path.is_file():
-            profile_path = ensure_profile(input_arg, out_path, route.script_name, conv_type)
-            print_output(out_path)
-            if json_output:
-                print_json_result(input_arg, out_path, route.script_name, conv_type, profile_path)
+    if out_path.is_file():
+        profile_path = ensure_profile(input_arg, out_path, route.script_name, conv_type)
+        print_output(out_path)
+        if json_output:
+            print_json_result(input_arg, out_path, route.script_name, conv_type, profile_path)
     return 0
 
 

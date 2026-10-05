@@ -18,13 +18,16 @@ beautifulsoup4>=4.12,<5  # .html / web pages
 ebooklib>=0.18,<1        # .epub
 nbconvert>=7,<8          # .ipynb
 
+# --- Regression fixtures (Office content preservation) ---
+python-docx>=1,<2       # DOCX fixtures for upstream regression tests
+
 # --- Spreadsheet / slide deck ---
 openpyxl>=3.1,<4         # .xlsx / .xlsm
-python-pptx>=0.6,<2      # .pptx / .pptm / .ppsx / .potx
+python-pptx>=1,<2      # .pptx / .pptm / .ppsx / .potx
 
 # --- Web fetching ---
 curl_cffi>=0.6,<1        # TLS impersonation (WeChat, Cloudflare-protected sites)
-pillow>=10,<13           # image post-processing for web_to_md.py
+pillow>=12,<13           # image post-processing for web_to_md.py
 
 # --- Recommended for web extraction ---
 trafilatura>=1.10,<2     # production-grade main-content extraction in web_to_md.py

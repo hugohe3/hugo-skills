@@ -1,12 +1,11 @@
 ---
 name: markdown-conversion
 description: >
-  Convert source documents (PDF / Word / Excel / PowerPoint / EPUB / HTML / Jupyter /
-  subtitles / web URL) into clean Markdown with links and images extracted alongside.
-  Default is a sensible auto-clean transcription; use --raw for archival fidelity,
-  or combine --filter-images / --no-images for image control. Also batch-converts
-  directories. Use when the user asks to turn a document into Markdown, "extract text
-  from a PDF", "把文档转成 md", "网页转 markdown", "批量转 md".
+  将 PDF、Word、Excel、PowerPoint、EPUB、HTML、Jupyter、字幕或网页 URL
+  转换为 Markdown，保留链接并提取图片；支持目录批量转换。
+  默认进行适度清理，--raw 关闭启发式清理，
+  --filter-images / --no-images 控制图片。
+  用户提出“把文档转成 md”“网页转 markdown”“批量转 md”或提取文档正文时使用。
 ---
 
 # Markdown 转换
@@ -95,8 +94,8 @@ python3 scripts/convert.py paper.pdf --raw --no-images     # 完美还原 + 纯�
 | `pdf_to_md.py`（本地） | 页眉页脚去重、字体大小 → 标题层级识别；低置信度表格误判会回退为正文；可用 `--render-vector-figures` 将大块矢量图显式渲染为 PNG |
 | `pdf_to_md_mineru.py` | MinerU 云端处理，本地无可关闭的清理（`--raw` 是 no-op）；图片过滤在结果下载后本地执行 |
 | `doc_to_md.py`（docx / html / epub / ipynb / pandoc） | 无显式清理（mammoth/nbconvert/ebooklib 已经是忠实转换；html 路径去除 `<head>/<style>/<script>`，视为必要而非启发式）；DOCX 会将文本表格保留为 pipe Markdown，将 OMML / Office Math 公式原位转为 LaTeX，并保留 EMF / WMF 资产 |
-| `ppt_to_md.py` | 无（python-pptx 直读，无清理；保留文本、表格、图表数据、外部 / 内部跳转链接和去重后的图片 manifest） |
-| `web_to_md.py` | trafilatura 正文识别（剥离导航/广告/侧栏/评论） |
+| `ppt_to_md.py` | 无（python-pptx 直读，无清理；保留软换行、字段文本、真实列表编号、表格、图表数据、SmartArt 节点、外部 / 内部跳转链接和图片 manifest） |
+| `web_to_md.py` | trafilatura 正文识别；不可用或无结果时回退上游正文识别；raw 保留完整 HTML body |
 | `subtitle_to_md.py` | 段落分块 + 每 50 条 `<!-- Block N --> <!-- HH:MM:SS -->` 锚点 |
 
 ## 批量目录转换
@@ -143,6 +142,7 @@ python3 scripts/pdf_to_md_mineru.py scan.pdf --no-images
 python3 scripts/doc_to_md.py paper.tex                        # 使用 pandoc
 python3 scripts/doc_to_md.py report.docx --filter-images
 python3 scripts/excel_to_md.py report.xlsm --max-rows 200 --max-cols 40
+python3 scripts/convert.py data.xlsx --include-hidden        # 包含隐藏工作表
 python3 scripts/ppt_to_md.py deck.pptx --filter-images        # 过滤母版背景/装饰
 python3 scripts/web_to_md.py https://example.com              # 默认 trafilatura 正文识别
 python3 scripts/web_to_md.py https://example.com --raw        # 关闭正文识别（保留 nav/footer）
@@ -152,6 +152,14 @@ python3 scripts/subtitle_to_md.py lecture.srt --raw           # 单行拼接（�
 
 每个脚本输出 `<输入>.md` 及嵌入图片的 `<输入>_files/`，Markdown 中使用相对路径引用。支持图片 manifest 的后端会额外写入 `<输入>_files/image_manifest.json`，用于下游判断图片尺寸、来源和出现位置。成功转换会写入 `<stem>.conversion_profile.json`；统一调度器还支持 `--json` 打印机器可读结果。
 所有图片相关后端都支持 `--no-images` 和 `--filter-images`（互斥）；启发式清理可用 `--raw` 关闭。
+
+## Excel 数值与结构
+
+- 默认导出可见工作表，并列出隐藏 / 深度隐藏工作表的名称及提示；--include-hidden 导出这些工作表并标明状态。
+- 普通数值保留 Excel 的 15 位有效数字，避免旧版 6 位有效数字舍入；百分比精确乘以 100 并附加 %，不按显示的小数位数截断。
+- 整数标识符格式（如 0000）保留前导零；日期时间保留小数秒。其他带单位或缩放的未知格式保留原值，并按工作表汇总警告。
+- 合并单元格沿用锚点值和格式，数值合并区域注明共享值，避免重复值被误认为可累加的独立数据；纯文本合并不添加此标注。
+- 公式读取文件中缓存的结果，不重新计算公式；--max-rows / --max-cols 仍控制输出上限。
 
 ## 选择 PDF 后端
 
@@ -168,7 +176,7 @@ MinerU 需要 `MINERU_API_TOKEN`，或将 `resources/config.example.json` 复制
 
 ## 网页抓取
 
-`web_to_md.py` 支持所有 URL。安装 `curl_cffi` 后可模拟 Chrome TLS 指纹，能抓取微信公众号（`mp.weixin.qq.com`）等屏蔽 Python 默认指纹的站点——无需额外参数。未安装时回退到标准 `requests`（大多数公开网站够用）。
+`web_to_md.py` 支持所有 URL。安装 `curl_cffi` 后可模拟 Chrome TLS 指纹，能抓取微信公众号（`mp.weixin.qq.com`）等屏蔽 Python 默认指纹的站点——无需额外参数。默认校验证书并拒绝私网目标；可信内网页面可显式使用 --allow-private-hosts，自签名证书可使用 --insecure。未安装时回退到标准 `requests`（大多数公开网站够用）。
 
 ## 环境诊断
 

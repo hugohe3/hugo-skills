@@ -4,10 +4,10 @@
 web_to_md.py - Web Page to Markdown Converter (Python Version)
 
 Usage:
-    python3 scripts/web_to_md.py <url>
-    python3 scripts/web_to_md.py <url1> <url2> ...
-    python3 scripts/web_to_md.py -f urls.txt
-    python3 scripts/web_to_md.py <url> -o output.md
+    python scripts/source_to_md/web_to_md.py <url>
+    python scripts/source_to_md/web_to_md.py <url1> <url2> ...
+    python scripts/source_to_md/web_to_md.py -f urls.txt
+    python scripts/source_to_md/web_to_md.py <url> -o output.md
 
 Dependencies:
     pip install requests beautifulsoup4
@@ -19,55 +19,302 @@ TLS fingerprint handling:
     'curl_cffi' is unavailable, it silently falls back to plain 'requests' — so
     non-blocking sites still work without the extra dependency.
 
+    Public-only requests pin validated addresses: curl_cffi uses CURLOPT_RESOLVE
+    while requests uses connection-local validation and numeric socket targets.
+    Both retain the URL hostname for TLS verification. Environment proxies are
+    disabled in this mode because a proxy could resolve the target again;
+    --allow-private-hosts restores proxy use and unrestricted address resolution.
+
     Install for WeChat / Chinese-portal coverage:
         pip install curl_cffi
+
+    If curl_cffi is unavailable on your platform, the Node.js counterpart
+    (scripts/source_to_md/web_to_md.cjs) remains available as a fallback.
 """
 
+from __future__ import annotations
+
 import argparse
+import codecs
 import datetime
 import io
+import ipaddress
 import json
 import os
 import re
+import unicodedata
+import socket
+import subprocess
 import sys
 import time
+from email.message import Message
+from pathlib import Path
 from urllib.parse import urljoin, urlparse
+from urllib.request import Request
 
-try:
-    import requests
-    from bs4 import BeautifulSoup, NavigableString, Tag
-except ImportError:
-    print("Error: This script requires 'requests' and 'beautifulsoup4'.")
-    print("Please run: pip install requests beautifulsoup4")
-    sys.exit(1)
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from pathlib import Path as _Path
-sys.path.insert(0, str(_Path(__file__).parent))
-from _conversion_profile import write_source_profile  # noqa: E402
-from _image_filter import should_keep_image_bytes as _should_keep_image_bytes  # noqa: E402
+from _image_filter import should_keep_image_bytes
+from _dispatcher import (  # noqa: E402
+    DOC_SUFFIXES,
+    EXCEL_SUFFIXES,
+    LEGACY_EXCEL_SUFFIXES,
+    PDF_SUFFIXES,
+    PRESENTATION_SUFFIXES,
+    build_conversion_command,
+)
+from _conversion_profile import (  # noqa: E402
+    profile_path_for,
+    record_source_url,
+    write_conversion_profile_best_effort,
+)
 
-# Default: trafilatura provides production-grade main-content extraction.
-# Used by default; --raw disables it and falls back to the heuristic
-# CMS-selector scoring (which preserves more boilerplate / nav / footer).
-try:
-    import trafilatura  # type: ignore
-    _TRAFILATURA_AVAILABLE = True
-except ImportError:
-    trafilatura = None
-    _TRAFILATURA_AVAILABLE = False
+
+# Help must not depend on the optional conversion packages: a stdlib-only
+# interpreter still gets the argparse usage .
+_HELP_REQUESTED = __name__ == "__main__" and any(
+    arg in {"-h", "--help"} for arg in sys.argv[1:]
+)
+if not _HELP_REQUESTED:
+    try:
+        import requests
+        from bs4 import BeautifulSoup, Comment, NavigableString, Tag
+        from urllib3.util import parse_url
+    except ImportError:
+        print("Error: This script requires 'requests' and 'beautifulsoup4'.", file=sys.stderr)
+        print("Please run: pip install requests beautifulsoup4", file=sys.stderr)
+        sys.exit(1)
 
 # Prefer curl_cffi for TLS-fingerprint impersonation (bypasses JA3 blocking on
 # sites like WeChat). Fall back to plain requests when it's not installed.
 try:
+    from curl_cffi import CurlOpt  # type: ignore
     from curl_cffi import requests as curl_requests  # type: ignore
     _CURL_IMPERSONATE = "chrome120"
 except ImportError:
+    CurlOpt = None
     curl_requests = None
     _CURL_IMPERSONATE = None
 
 
+try:
+    import trafilatura
+except ImportError:
+    trafilatura = None
+
+
+class _UnsafeUrlError(ValueError):
+    """Reject a URL that cannot be verified as a public HTTP(S) target."""
+
+
+_NON_PUBLIC_IPV4_NETWORKS = tuple(ipaddress.ip_network(network) for network in (
+    "0.0.0.0/8", "100.64.0.0/10", "240.0.0.0/4",
+))
+
+
+def _check_url_characters(url: str) -> None:
+    """Reject characters clients could strip or reinterpret before parsing."""
+    if "\\" in url or any(char.isspace() or unicodedata.category(char) == "Cc" for char in url):
+        raise _UnsafeUrlError("Refusing URL containing backslash, whitespace, or control characters")
+
+
+def _prepare_url(url: str) -> str:
+    """Return the client's URL only when both parsers agree on its hostname."""
+    _check_url_characters(url)
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise _UnsafeUrlError("Only HTTP(S) URLs with a hostname are allowed")
+        prepared = requests.PreparedRequest()
+        prepared.prepare_url(url, None)
+        hostname = parse_url(prepared.url).host
+        # The raw hostname must survive preparation unchanged, so a host the
+        # client decodes differently (percent-encoded labels) is refused. An IDN
+        # host legitimately becomes punycode; compare its IDNA form. urllib3
+        # keeps IPv6 brackets; urlparse does not.
+        raw_host = parsed.hostname
+        if not raw_host.isascii():
+            try:
+                raw_host = raw_host.encode("idna").decode("ascii")
+            except UnicodeError as exc:
+                raise _UnsafeUrlError(f"Invalid internationalized hostname: {exc}") from exc
+        if not hostname or raw_host.lower() != hostname.strip("[]").lower():
+            raise _UnsafeUrlError("Refusing URL with inconsistent parsed hostnames")
+        return prepared.url
+    except (ValueError, requests.exceptions.RequestException) as exc:
+        if isinstance(exc, _UnsafeUrlError):
+            raise
+        raise _UnsafeUrlError(f"Invalid URL: {exc}") from exc
+
+
+def _resolve_public_addresses(hostname: str) -> list:
+    """Resolve once and validate every address before any socket is created."""
+    try:
+        addresses = [ipaddress.ip_address(hostname)]
+    except ValueError:
+        try:
+            addresses = [
+                ipaddress.ip_address(info[4][0])
+                for info in socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+            ]
+        except (OSError, ValueError) as exc:
+            raise _UnsafeUrlError(f"Cannot validate URL hostname {hostname}: {exc}") from exc
+    if not addresses:
+        raise _UnsafeUrlError(f"Cannot resolve URL hostname {hostname}")
+    if CONFIG["allow_private_hosts"]:
+        return addresses
+    for address in addresses:
+        scoped = getattr(address, "scope_id", None)
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+            address = address.ipv4_mapped
+        if (address.is_loopback or address.is_link_local
+                or address.is_private or address.is_unspecified
+                or address.is_multicast or address.is_reserved
+                or scoped
+                or any(address in network for network in _NON_PUBLIC_IPV4_NETWORKS)):
+            raise _UnsafeUrlError(
+                f"Refusing non-public URL target: {hostname} resolves to {address} "
+                "(pass --allow-private-hosts for intranet or localhost pages)"
+            )
+    return list(dict.fromkeys(addresses))
+
+
+def _validate_public_url(url: str) -> tuple[str, list]:
+    """Return the prepared URL and its validated addresses for transport use."""
+    prepared = _prepare_url(url)
+    hostname = parse_url(prepared).host.strip("[]")
+    return prepared, _resolve_public_addresses(hostname)
+
+
+class _PublicConnectionMixin:
+    """Keep urllib3's hostname/TLS handling but connect only to checked IPs."""
+
+    def _new_conn(self):
+        from urllib3.exceptions import ConnectTimeoutError, NewConnectionError
+        from urllib3.util import Timeout
+
+        addresses = _resolve_public_addresses(self._dns_host)
+        error = None
+        for address in addresses:
+            sock = None
+            try:
+                family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
+                sock = socket.socket(family, socket.SOCK_STREAM)
+                for option in self.socket_options or ():
+                    sock.setsockopt(*option)
+                if self.timeout is not Timeout.DEFAULT_TIMEOUT:
+                    sock.settimeout(self.timeout)
+                if self.source_address:
+                    sock.bind(self.source_address)
+                # Numeric addresses go straight to connect; no second DNS lookup.
+                sock.connect((str(address), self.port))
+                sys.audit("http.client.connect", self, self.host, self.port)
+                return sock
+            except OSError as exc:
+                error = exc
+                if sock is not None:
+                    sock.close()
+        if isinstance(error, socket.timeout):
+            raise ConnectTimeoutError(self, f"Connection to {self.host} timed out") from error
+        raise NewConnectionError(self, f"Failed to establish a new connection: {error}") from error
+
+
+def _public_http_adapter():
+    """Build isolated pools without patching requests or urllib3 globally."""
+    from urllib3.connection import HTTPConnection, HTTPSConnection
+    from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+
+    class PublicHTTPConnection(_PublicConnectionMixin, HTTPConnection):
+        pass
+
+    class PublicHTTPSConnection(_PublicConnectionMixin, HTTPSConnection):
+        pass
+
+    class PublicHTTPConnectionPool(HTTPConnectionPool):
+        ConnectionCls = PublicHTTPConnection
+
+    class PublicHTTPSConnectionPool(HTTPSConnectionPool):
+        ConnectionCls = PublicHTTPSConnection
+
+    adapter = requests.adapters.HTTPAdapter()
+    adapter.poolmanager.pool_classes_by_scheme = {
+        "http": PublicHTTPConnectionPool,
+        "https": PublicHTTPSConnectionPool,
+    }
+    return adapter
+
+
+def _validate_response_redirect(response, **kwargs) -> None:
+    """Check requests redirects before its redirect engine sends the next hop."""
+    try:
+        response_url, _ = _validate_public_url(response.url)
+        if response.is_redirect:
+            # Match requests' decoding of the HTTP Location header.
+            location = response.headers["location"].encode("latin1").decode("utf8")
+            _check_url_characters(location)
+            next_url, _ = _validate_public_url(urljoin(response_url, location))
+            response.headers["location"] = next_url
+    except _UnsafeUrlError:
+        response.close()
+        raise
+
+
+def _curl_http_get(url: str, *, headers: dict | None, timeout: int | None,
+                   verify: bool, stream: bool):
+    """Pin each curl hop with CURLOPT_RESOLVE, retaining Chrome impersonation."""
+    cookies = requests.cookies.RequestsCookieJar()
+    headers = requests.structures.CaseInsensitiveDict(headers or {})
+    max_redirects = requests.models.DEFAULT_REDIRECT_LIMIT
+    for redirect_count in range(max_redirects + 1):
+        url, addresses = _validate_public_url(url)
+        curl_options = {}
+        if not CONFIG["allow_private_hosts"]:
+            target = parse_url(url)
+            port = target.port if target.port is not None else (443 if target.scheme == "https" else 80)
+            # IPv6 addresses need brackets in libcurl's host:port:address list.
+            pinned = ",".join(f"[{ip}]" if ip.version == 6 else str(ip) for ip in addresses)
+            curl_options = {CurlOpt.RESOLVE: [f"{target.host}:{port}:{pinned}"], CurlOpt.PROXY: ""}
+        response = curl_requests.get(
+            url, headers=headers, timeout=timeout, verify=verify,
+            impersonate=_CURL_IMPERSONATE, stream=stream,
+            allow_redirects=False, cookies=cookies, curl_options=curl_options, quote=False,
+        )
+        try:
+            _validate_public_url(response.url)
+        except _UnsafeUrlError:
+            response.close()
+            raise
+        if response.status_code not in (301, 302, 303, 307, 308):
+            return response
+        location = response.headers.get("Location")
+        if not location:
+            return response
+        try:
+            _check_url_characters(location)
+            next_url, _ = _validate_public_url(urljoin(response.url, location))
+            if redirect_count >= max_redirects:
+                raise requests.exceptions.TooManyRedirects(
+                    f"Exceeded {max_redirects} redirects.", response=response,
+                )
+            cookie_headers = Message()
+            for value in response.headers.get_list("Set-Cookie"):
+                cookie_headers.add_header("Set-Cookie", value)
+            cookies.extract_cookies(
+                requests.cookies.MockResponse(cookie_headers), Request(response.url),
+            )
+            if requests.Session().should_strip_auth(response.url, next_url):
+                headers = headers.copy()
+                for name in ("Authorization", "Cookie", "Host"):
+                    headers.pop(name, None)
+            url = next_url
+        finally:
+            response.close()
+
+
 def _http_get(url: str, *, headers: dict | None = None, timeout: int | None = None,
-              verify: bool = False, stream: bool = False):
+              verify: bool = True, stream: bool = False):
     """HTTP GET with curl_cffi preferred, requests fallback.
 
     Using curl_cffi lets this script fetch sites that reject Python's default
@@ -75,25 +322,175 @@ def _http_get(url: str, *, headers: dict | None = None, timeout: int | None = No
     requests.get() this script actually uses.
     """
     if curl_requests is not None:
-        return curl_requests.get(
-            url, headers=headers, timeout=timeout,
-            verify=verify, impersonate=_CURL_IMPERSONATE, stream=stream,
+        return _curl_http_get(
+            url, headers=headers, timeout=timeout, verify=verify, stream=stream,
         )
-    return requests.get(url, headers=headers, timeout=timeout,
-                        verify=verify, stream=stream)
+    url, _ = _validate_public_url(url)
+    with requests.Session() as session:
+        if not CONFIG["allow_private_hosts"]:
+            session.trust_env = False
+            adapter = _public_http_adapter()
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
+        response = session.get(
+            url, headers=headers, timeout=timeout, verify=verify, stream=stream,
+            hooks={"response": _validate_response_redirect},
+        )
+    try:
+        _validate_public_url(response.url)
+    except _UnsafeUrlError:
+        response.close()
+        raise
+    return response
+
+
+def _normalize_charset(charset: str | None) -> str:
+    """Return a Python codec name when the declared charset is usable."""
+    if not charset:
+        return ""
+    charset = charset.strip().strip('"').strip("'").lower()
+    if not charset:
+        return ""
+    try:
+        return codecs.lookup(charset).name
+    except LookupError:
+        return ""
+
+
+def _charset_from_headers(headers: dict) -> str:
+    content_type = headers.get("Content-Type") or headers.get("content-type") or ""
+    match = re.search(r"charset\s*=\s*([^;\s]+)", content_type, re.I)
+    return _normalize_charset(match.group(1)) if match else ""
+
+
+def _charset_from_html(raw: bytes) -> str:
+    """Extract a charset declaration from the first chunk of HTML bytes."""
+    head = raw[:8192]
+    patterns = [
+        rb"<meta[^>]+charset=[\"']?\s*([a-zA-Z0-9_\-]+)",
+        rb"<meta[^>]+content=[\"'][^\"']*charset=\s*([a-zA-Z0-9_\-]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, head, re.I)
+        if match:
+            return _normalize_charset(match.group(1).decode("ascii", "ignore"))
+    return ""
+
+
+BODY_SHORTFALL_MIN_CHARS = 200
+BODY_SHORTFALL_RATIO = 0.25
+
+
+def _page_visible_text(soup) -> str:
+    """Return the page's rendered text with scripts, styles, and noscript removed."""
+    for node in soup(["script", "style", "noscript", "template"]):
+        node.decompose()
+    return re.sub(r"\s+", " ", soup.get_text(" ")).strip()
+
+
+def _body_shortfall_warning(markdown_text: str, page_text: str) -> str | None:
+    """Warn when the extracted body is a sliver of the text the page shows.
+
+    A content container that the extractor did not recognise yields a short,
+    plausible-looking Markdown file; comparing it against the page's visible
+    text turns that silent loss into a warning the caller can act on.
+    """
+    body_chars = len(re.sub(r"\s+", "", markdown_text))
+    page_chars = len(re.sub(r"\s+", "", page_text))
+    if body_chars >= BODY_SHORTFALL_MIN_CHARS or page_chars < BODY_SHORTFALL_MIN_CHARS * 2:
+        return None
+    if body_chars > page_chars * BODY_SHORTFALL_RATIO:
+        return None
+    return (
+        f"body extraction kept {body_chars} characters while the page shows "
+        f"{page_chars}; the content container was not recognised, so verify "
+        "the Markdown against the page before using it as a source"
+    )
+
+
+def _decode_quality_score(text: str) -> int:
+    """Score obvious decode artifacts; lower is better."""
+    mojibake_markers = [
+        "�", "锟", "Ã", "Â", "â€", "â€™", "â€œ", "â€\x9d",
+        "琚", "佸", "鍦", "涓", "鏄", "寤", "骞", "鏈", "鏃", "鈥",
+    ]
+    marker_hits = sum(text.count(marker) for marker in mojibake_markers)
+    control_hits = sum(1 for ch in text if ord(ch) < 32 and ch not in "\t\n\r")
+    return marker_hits * 20 + control_hits * 10 + text.count("\ufffd") * 50
+
+
+def _decode_response_text(response) -> str:
+    """Decode HTTP response bytes without letting guessed encodings override declarations."""
+    raw = response.content
+    declared = [
+        _charset_from_headers(response.headers),
+        _charset_from_html(raw),
+    ]
+    if raw.startswith(codecs.BOM_UTF8):
+        declared.insert(0, "utf-8-sig")
+
+    seen = set()
+    declared = [enc for enc in declared if enc and not (enc in seen or seen.add(enc))]
+    for enc in declared:
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+
+    candidates = []
+    for enc in [
+        getattr(response, "encoding", None),
+        getattr(response, "apparent_encoding", None),
+        "utf-8",
+        "gb18030",
+        "big5",
+    ]:
+        enc = _normalize_charset(enc)
+        if enc and enc not in candidates:
+            candidates.append(enc)
+
+    decoded = []
+    for enc in candidates:
+        try:
+            text = raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+        decoded.append((_decode_quality_score(text), enc, text))
+
+    if decoded:
+        decoded.sort(key=lambda item: item[0])
+        return decoded[0][2]
+
+    # Every strict decode failed: the page carries a few bad bytes. Keep the
+    # declared charset in the running instead of dropping to UTF-8, and let
+    # the artifact score pick the lossy decode that damages the least text.
+    lossy = []
+    for enc in declared + [enc for enc in candidates if enc not in declared]:
+        try:
+            text = raw.decode(enc, errors="replace")
+        except LookupError:
+            continue
+        lossy.append((_decode_quality_score(text), enc, text))
+    if lossy:
+        lossy.sort(key=lambda item: item[0])
+        return lossy[0][2]
+    return raw.decode("utf-8", errors="replace")
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageOps
     PILLOW_AVAILABLE = True
 except ImportError:
     PILLOW_AVAILABLE = False
-    print("[WARN] Pillow not installed. WebP images will not be converted to PNG.")
-    print("       Run: pip install Pillow")
+    if not _HELP_REQUESTED:
+        print("[WARN] Pillow not installed. WebP images will not be converted to PNG.", file=sys.stderr)
+        print("       Run: pip install Pillow", file=sys.stderr)
 
 # ============ Config ============
 CONFIG = {
     "output_dir": "./projects",
     "timeout": 30,
+    "insecure": False,
+    "allow_private_hosts": False,
     "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     # Specific content identifiers often found in Chinese CMS (Gov/News)
     "content_selectors": [
@@ -124,15 +521,8 @@ CONFIG = {
 }
 
 
-def fetch_url(url: str) -> str:
-    """Fetch a web page with explicit headers and encoding detection.
-
-    Args:
-        url: Target URL.
-
-    Returns:
-        The response body as text.
-    """
+def fetch_response(url: str):
+    """Fetch a URL with explicit headers and return the raw HTTP response."""
     headers = {
         "User-Agent": CONFIG["user_agent"],
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -141,34 +531,47 @@ def fetch_url(url: str) -> str:
 
     try:
         response = _http_get(url, headers=headers,
-                             timeout=CONFIG["timeout"], verify=False)
+                             timeout=CONFIG["timeout"], verify=not CONFIG["insecure"])
         response.raise_for_status()
-
-        # Enhanced encoding detection (requests handles this well usually, but we force apparent_encoding for Chinese)
-        # curl_cffi exposes the same .apparent_encoding attribute
-        if hasattr(response, "apparent_encoding") and response.apparent_encoding:
-            response.encoding = response.apparent_encoding
-
-        return response.text
+        return response
     except Exception as e:
         raise Exception(f"Failed to fetch {url}: {str(e)}")
 
 
-def clean_title(title: str) -> str:
-    """Remove common site suffixes from a title."""
+def fetch_url(url: str) -> tuple[str, str]:
+    """Fetch a web page as decoded text plus the final URL after redirects."""
+    response = fetch_response(url)
+    return _decode_response_text(response), response.url
+
+
+def clean_title(title: str, site_name: str = "") -> str:
+    """Remove only a trailing site name verified by page metadata."""
     if not title:
         return ""
-    # Remove site name suffixes often found in Chinese titles
-    clean = re.sub(r"[-_|].*?(政府|门户|网站|委员会).*$", "", title)
-    return clean.strip()
+    if site_name.strip():
+        title = re.sub(r"\s*[-_|]\s*" + re.escape(site_name.strip()) + r"\s*$", "", title)
+    return title.strip()
+
+
+_FILENAME_TRANSLITERATIONS = str.maketrans({
+    'đ': 'd', 'Đ': 'D', 'ø': 'o', 'Ø': 'O', 'ł': 'l', 'Ł': 'L',
+    'ß': 'ss', 'æ': 'ae', 'Æ': 'AE', 'œ': 'oe', 'Œ': 'OE', 'ı': 'i',
+})
 
 
 def sanitize_filename(name: str) -> str:
-    """Sanitize a string for filesystem-safe filenames."""
+    """Sanitize a string for filesystem-safe filenames.
+
+    Accented Latin letters fold to their base letter (``Khát vọng`` ->
+    ``Khat_vong``) instead of vanishing; letters of any script and digits
+    stay, everything else is dropped.
+    """
+    folded = unicodedata.normalize('NFKD', name.translate(_FILENAME_TRANSLITERATIONS))
+    folded = ''.join(ch for ch in folded if not unicodedata.combining(ch))
     # Replace whitespace with underscore first
-    clean = re.sub(r'\s+', '_', name)
-    # Remove all except Chinese, English, Numbers, Underscore
-    clean = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9_]', '', clean)
+    clean = re.sub(r'\s+', '_', folded)
+    # Keep letters and digits of any script, underscore, hyphen
+    clean = ''.join(ch for ch in clean if ch.isalnum() or ch in '_-')
     # Collapse repeating underscores
     clean = re.sub(r'_+', '_', clean)
     return clean[:80]  # Truncate
@@ -217,69 +620,81 @@ def build_image_filename(abs_url: str, seq: int, content_type: str | None = None
     return f"{stem}{ext}"
 
 
+def resolve_content_image_url(img: Tag, page_url: str) -> str | None:
+    """Resolve one content image, preferring real lazy-load URLs."""
+    candidates = [
+        img.get("data-src"),
+        img.get("data-original"),
+        img.get("data-lazy-src"),
+        img.get("data-actualsrc"),
+        img.get("src"),
+    ]
+    for value in candidates:
+        if not isinstance(value, str):
+            continue
+        src = value.strip()
+        if not src or src.startswith(("data:", "javascript:", "blob:", "#")):
+            continue
+        _check_url_characters(src)
+        resolved = urljoin(page_url, src)
+        parsed = urlparse(resolved)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            img["src"] = resolved
+            return resolved
+    return None
+
+
+def rewrite_images_to_remote_urls(content_element: Tag | None, page_url: str) -> int:
+    """Retain remote image links without downloading image bytes."""
+    if content_element is None:
+        return 0
+    return sum(
+        resolve_content_image_url(img, page_url) is not None
+        for img in content_element.find_all("img")
+    )
+
+
 def download_and_rewrite_images(
     content_element: Tag | None,
     page_url: str,
     image_dir: str,
     rel_prefix: str,
     filter_images: bool = False,
-) -> tuple[int, list[dict]]:
+) -> int:
     """Download images under the main content node and rewrite `src` paths."""
     if content_element is None:
-        return 0, []
+        return 0
     images = list(content_element.find_all("img"))
     if not images:
-        return 0, []
+        return 0
 
     os.makedirs(image_dir, exist_ok=True)
     downloaded = {}
-    image_sources: list[dict] = []
-    source_by_url: dict[str, dict] = {}
+    manifest_by_filename: dict[str, dict[str, object]] = {}
     saved = 0
-    seen_hashes: set[str] = set()
-    # Mutate the soup in place: decompose any <img> the ai filter rejects.
-    to_decompose: list[Tag] = []
 
     for idx, img in enumerate(images):
-        # Prefer lazy-load attributes — WeChat, Zhihu, and many CMSes keep the
-        # real image URL in data-src / data-original / data-lazy-src, with
-        # `src` pointing at a 1x1 placeholder or a template literal.
-        candidates = [
-            img.get("data-src"),
-            img.get("data-original"),
-            img.get("data-lazy-src"),
-            img.get("data-actualsrc"),
-            img.get("src"),
-        ]
-        src = next((s for s in candidates
-                    if s and not s.startswith("data:")
-                    and s.startswith(("http://", "https://", "//", "/"))), None)
-        if not src:
+        abs_url = resolve_content_image_url(img, page_url)
+        if abs_url is None:
             continue
-
-        # Promote the chosen URL into the element's src so downstream rewrite
-        # (which matches on src) can retarget it to the local file.
-        img["src"] = src
-
-        abs_url = urljoin(page_url, src)
+        content_type = ""
+        converted_from = ""
         if abs_url in downloaded:
             saved_name = downloaded[abs_url]
-            source_entry = source_by_url.get(abs_url)
         else:
             try:
                 resp = _http_get(
                     abs_url,
                     headers={"User-Agent": CONFIG["user_agent"]},
                     timeout=CONFIG["timeout"],
-                    verify=False,
+                    verify=not CONFIG["insecure"],
                 )
                 resp.raise_for_status()
-                if filter_images and not _should_keep_image_bytes(resp.content, seen_hashes=seen_hashes):
-                    to_decompose.append(img)
+                if filter_images and not should_keep_image_bytes(resp.content):
+                    img.decompose()
                     continue
                 filename = build_image_filename(
                     abs_url, idx, resp.headers.get("Content-Type"))
-                original_content_type = resp.headers.get("Content-Type", "").split(";")[0].strip()
 
                 # Check if image is webp and convert to png
                 stem, ext = os.path.splitext(filename)
@@ -290,9 +705,11 @@ def download_and_rewrite_images(
                     # Convert webp to png (optimized)
                     try:
                         img_data = io.BytesIO(resp.content)
-                        pil_image = Image.open(img_data)
+                        with Image.open(img_data) as source:
+                            pil_image = ImageOps.exif_transpose(source)
 
                         # Update filename to .png
+                        converted_from = filename
                         filename = f"{stem}.png"
                         local_path = os.path.join(image_dir, filename)
 
@@ -337,20 +754,22 @@ def download_and_rewrite_images(
                         f.write(resp.content)
                 downloaded[abs_url] = filename
                 saved_name = filename
-                rel_saved_path = os.path.join(
-                    rel_prefix, saved_name) if rel_prefix else saved_name
-                source_entry = {
-                    "index": len(image_sources) + 1,
+                manifest_by_filename[saved_name] = {
+                    "index": len(manifest_by_filename) + 1,
+                    "filename": saved_name,
+                    "original_filename": converted_from or saved_name,
+                    "asset_kind": "bitmap",
+                    "svg_renderable": True,
+                    "pptx_native_supported": True,
+                    "source_kind": "web_image",
+                    "source_url": abs_url,
                     "source_page_url": page_url,
-                    "download_url": abs_url,
-                    "local_path": rel_saved_path,
-                    "content_type": original_content_type,
-                    "license_status": "unknown",
+                    "content_type": content_type.split(";")[0] if content_type else "",
                     "occurrences": [],
                 }
-                image_sources.append(source_entry)
-                source_by_url[abs_url] = source_entry
                 saved += 1
+            except _UnsafeUrlError:
+                raise
             except Exception as e:
                 print(f"   [WARN] Skip image {abs_url}: {e}")
                 continue
@@ -358,18 +777,40 @@ def download_and_rewrite_images(
         rel_path = os.path.join(
             rel_prefix, saved_name) if rel_prefix else saved_name
         img["src"] = rel_path
-        if source_entry is not None:
-            occurrences = source_entry.setdefault("occurrences", [])
-            occurrences.append({
-                "occurrence_index": len(occurrences) + 1,
-                "alt": img.get("alt", ""),
-                "source_ref": rel_path,
-            })
+        manifest_item = manifest_by_filename.get(saved_name)
+        if manifest_item is not None:
+            occurrences = manifest_item.setdefault("occurrences", [])
+            if isinstance(occurrences, list):
+                occurrences.append({
+                    "occurrence_index": idx + 1,
+                    "source_url": abs_url,
+                    "alt_text": img.get("alt", ""),
+                })
+                manifest_item["usage_count"] = len(occurrences)
 
-    for stale in to_decompose:
-        stale.decompose()
+    if manifest_by_filename:
+        manifest_path = os.path.join(image_dir, "image_manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(
+                list(manifest_by_filename.values()),
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+            f.write("\n")
 
-    return saved, image_sources
+    if manifest_by_filename:
+        sources = {"schema": "markdown-conversion.image_sources.v1",
+                   "source_page_url": page_url,
+                   "items": [{"index": item["index"], "source_page_url": page_url,
+                              "download_url": item["source_url"],
+                              "local_path": Path(rel_prefix, item["filename"]).as_posix(),
+                              "content_type": item["content_type"],
+                              "license_status": "unknown", "occurrences": item["occurrences"]}
+                             for item in manifest_by_filename.values()]}
+        Path(image_dir, "image_sources.json").write_text(
+            json.dumps(sources, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return saved
 
 
 def extract_metadata(soup: BeautifulSoup, url: str) -> dict[str, str]:
@@ -377,7 +818,7 @@ def extract_metadata(soup: BeautifulSoup, url: str) -> dict[str, str]:
 
     # 1. Title
     title_tag = soup.title
-    title = clean_title(title_tag.string if title_tag else "")
+    title = title_tag.get_text() if title_tag else ""
 
     # 2. Meta tags
     metas = {}
@@ -386,6 +827,7 @@ def extract_metadata(soup: BeautifulSoup, url: str) -> dict[str, str]:
         content = meta.get("content")
         if name and content:
             metas[name.lower()] = content.strip()
+    title = clean_title(title, metas.get("og:site_name", ""))
 
     # 3. Date Extraction Strategies
     date = (
@@ -414,11 +856,13 @@ def extract_metadata(soup: BeautifulSoup, url: str) -> dict[str, str]:
 
     if not date:
         # Try URL matching
-        match = re.search(r"(\d{4})(\d{2})[\/_](?:t\d+_)?", url)
+        # Only a plausible year and month: a handle or record number such as
+        # ".../10665/379812/..." is not May 3798.
+        match = re.search(r"(?<!\d)((?:19|20)\d{2})(0[1-9]|1[0-2])[\/_](?:t\d+_)?", url)
         if match:
             date = f"{match.group(1)}-{match.group(2)}"
         else:
-            match = re.search(r"(\d{4})[-\/](\d{2})[-\/](\d{2})", url)
+            match = re.search(r"(?<!\d)((?:19|20)\d{2})[-\/](0[1-9]|1[0-2])[-\/](\d{2})", url)
             if match:
                 date = f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
 
@@ -455,37 +899,46 @@ def extract_metadata(soup: BeautifulSoup, url: str) -> dict[str, str]:
 
 def find_main_content(soup: BeautifulSoup) -> Tag | None:
     """Find the most likely main content container in a page."""
-    # 1. Clean up first (remove known clutter)
-    for tag in soup(["script", "style", "nav", "header", "footer", "aside", "noscript", "iframe"]):
+    # Identify explicit body containers before removing page-shell semantics.
+    candidates = []
+    for selector in CONFIG["content_selectors"]:
+        elements = soup.find_all(selector["name"]) if "name" in selector else soup.find_all(**selector)
+        for element in elements:
+            if not any(element is existing for existing in candidates):
+                candidates.append(element)
+    for tag in soup(["script", "style", "nav", "noscript", "iframe"]):
         tag.decompose()
+    for tag in soup(["header", "footer", "aside"]):
+        if not any(tag is body or body in tag.parents for body in candidates):
+            tag.decompose()
+
+    # Keep the original length/score gates: selector matches can be breadcrumbs
+    # or related-story cards. Merge only independently qualified body roots.
+    qualified = []
+    for element in candidates:
+        if element.parent is None:
+            continue
+        text = element.get_text(strip=True)
+        score = len(text) + 2 * len(re.findall(r'[\u4e00-\u9fa5]', text))
+        if len(text) >= 100 and score >= 200:
+            qualified.append(element)
+    candidates = qualified
+    roots = [element for element in candidates if element.parent is not None
+             and not any(parent is other for parent in element.parents for other in candidates)]
+    if roots:
+        if len(roots) == 1:
+            return roots[0]
+        combined = soup.new_tag("div")
+        # find_all gives document order, regardless of selector priority.
+        for element in list(soup.find_all(True)):
+            if any(element is root for root in roots):
+                combined.append(element.extract())
+        return combined
 
     best_element = None
     max_score = 0
 
-    # 2. Strategy A: Check specific classes/ids
-    for selector in CONFIG["content_selectors"]:
-        if "name" in selector:
-            # Tag name match (article, main)
-            elements = soup.find_all(selector["name"])
-        else:
-            # Class or ID match
-            elements = soup.find_all(attrs=selector)
-
-        for el in elements:
-            # Score based on text length and chinese character count
-            text = el.get_text(strip=True)
-            length = len(text)
-            if length < 100:
-                continue
-
-            chinese_count = len(re.findall(r'[\u4e00-\u9fa5]', text))
-            score = length + (chinese_count * 2)
-
-            if score > max_score:
-                max_score = score
-                best_element = el
-
-    # 3. Strategy B: If no specific container found, look for dense text areas with paragraphs
+    # Without explicit containers, retain the existing dense-text fallback.
     if not best_element or max_score < 200:
         for div in soup.find_all("div"):
             p_count = len(div.find_all("p", recursive=False))
@@ -609,25 +1062,107 @@ def element_to_markdown(element: Tag | NavigableString | None) -> str:
     return f"{content} "
 
 
-def simple_html_to_markdown_traversal(soup: Tag | BeautifulSoup | None) -> str:
+def simple_html_to_markdown_traversal(
+    soup: Tag | BeautifulSoup | None, page_url: str = "",
+) -> str:
     """Convert HTML content to Markdown using BeautifulSoup traversal."""
     lines = []
 
+    def fold(node: Tag) -> str:
+        """Convert a cell or caption like body text, folded onto one line."""
+        text = ''.join(traverse(child) for child in node.children)
+        return re.sub(r'\s+', ' ', text).strip().replace('|', '\\|')
+
+    def span(cell: Tag, name: str) -> int:
+        try:
+            return min(max(int(cell.get(name) or 1), 1), 50)
+        except ValueError:
+            return 1
+
+    def row_cells(row: Tag, carried: dict[int, int] | None = None) -> list[str]:
+        """Return one row's cells on the table grid.
+
+        A colspan pads empty cells to its right; ``carried`` maps a column to
+        the rows a rowspan above still covers, which take an empty cell here.
+        """
+        carried = {} if carried is None else carried
+        cells: list[str] = []
+
+        def fill_carried() -> None:
+            while carried.get(len(cells), 0) > 0:
+                carried[len(cells)] -= 1
+                cells.append('')
+
+        for cell in row.find_all(['td', 'th'], recursive=False):
+            fill_carried()
+            rowspan = span(cell, 'rowspan')
+            for offset in range(span(cell, 'colspan')):
+                if rowspan > 1:
+                    carried[len(cells)] = rowspan - 1
+                cells.append(fold(cell) if offset == 0 else '')
+        while any(count > 0 for column, count in carried.items() if column >= len(cells)):
+            if carried.get(len(cells), 0) > 0:
+                carried[len(cells)] -= 1
+            cells.append('')
+        return cells
+
     def traverse(node: Tag | NavigableString) -> str:
+        if isinstance(node, Comment):
+            # ``Comment`` is a ``NavigableString`` subclass: without this
+            # branch SSR markers such as ``<!--lit-node 1-->`` would be
+            # emitted as body text and even land inside headings.
+            return ""
         if isinstance(node, NavigableString):
             text = str(node)
             # Normalize whitespace but keep single spaces
-            text = re.sub(r'\s+', ' ', text)
-            if text.strip():
-                return text
-            return ""
+            return re.sub(r'\s+', ' ', text)
 
         if node.name in ['script', 'style', 'comment', 'meta', 'link']:
             return ""
 
+        if node.name in {'ol', 'ul'}:
+            items = node.find_all('li', recursive=False)
+            ordered = node.name == 'ol'
+            reversed_list = ordered and node.has_attr('reversed')
+            try:
+                counter = int(node.get('start', len(items) if reversed_list else 1))
+            except (ValueError, TypeError):
+                counter = 1
+            step = -1 if reversed_list else 1
+            numbers = []
+            for item in items:
+                try:
+                    counter = int(item.get('value', counter))
+                except (ValueError, TypeError):
+                    pass
+                numbers.append(counter)
+                counter += step
+            if ordered and (reversed_list or node.get('type', '1') != '1'
+                            or any(b != a + 1 for a, b in zip(numbers, numbers[1:]))):
+                # Markdown cannot represent jumps, reversal, or letter styles.
+                # Resolve links/images first, then retain HTML list semantics.
+                for link in node.find_all('a', href=True):
+                    href = link['href']
+                    if href.lower().startswith('javascript:'):
+                        del link['href']
+                    elif not href.startswith('#') and urlparse(href).scheme.lower() not in {'mailto', 'tel'}:
+                        link['href'] = urljoin(page_url, href)
+                return '\n\n' + str(node) + '\n\n'
+            rendered = []
+            for number, item in zip(numbers, items):
+                body = ''.join(traverse(child) for child in item.children).strip()
+                body_lines = body.splitlines()
+                marker = f'{number}. ' if ordered else '- '
+                indent = ' ' * len(marker)
+                rendered.append(marker + ('\n' + indent).join(body_lines))
+            return '\n\n' + '\n'.join(rendered) + '\n\n'
+
         # Handle Block Elements
         is_block = node.name in ['p', 'div', 'h1', 'h2', 'h3', 'h4',
-                                 'h5', 'h6', 'li', 'blockquote', 'pre', 'hr', 'table', 'tr']
+                                 'h5', 'h6', 'li', 'blockquote', 'pre', 'hr', 'table', 'tr',
+                                 'section', 'article', 'main', 'header', 'footer', 'nav',
+                                 'aside', 'ul', 'ol', 'dl', 'dt', 'dd', 'figure',
+                                 'figcaption', 'address', 'details', 'summary']
 
         # Pre-processing
         prefix = ""
@@ -652,6 +1187,8 @@ def simple_html_to_markdown_traversal(soup: Tag | BeautifulSoup | None) -> str:
         elif node.name == 'pre':
             # Extract raw text from pre to preserve formatting
             return f"\n\n```\n{node.get_text()}\n```\n\n"
+        elif is_block:
+            prefix, suffix = "\n\n", "\n\n"
 
         # Inline formatting
         if node.name in ['strong', 'b']:
@@ -662,7 +1199,9 @@ def simple_html_to_markdown_traversal(soup: Tag | BeautifulSoup | None) -> str:
             prefix, suffix = "`", "`"
         elif node.name == 'a':
             href = node.get('href')
-            if href and not href.startswith('javascript:'):
+            if href and not href.lower().startswith('javascript:'):
+                if not href.startswith('#') and urlparse(href).scheme.lower() not in {'mailto', 'tel'}:
+                    href = urljoin(page_url, href)
                 prefix = "["
                 suffix = f"]({href})"
             else:
@@ -679,26 +1218,42 @@ def simple_html_to_markdown_traversal(soup: Tag | BeautifulSoup | None) -> str:
         for child in node.children:
             res = traverse(child)
             if res:
-                inner_text += res
+                if isinstance(child, NavigableString) and not res.strip():
+                    if inner_text and not inner_text.endswith((' ', '\n')):
+                        inner_text += ' '
+                else:
+                    if res.startswith('\n'):
+                        inner_text = inner_text.rstrip(' ')
+                    elif inner_text.endswith((' ', '\n')) and child.name != 'br':
+                        res = res.lstrip(' ')
+                    inner_text += res
 
-        # Post-processing for tables (simplified)
+        if is_block:
+            inner_text = inner_text.strip()
+
         if node.name == 'tr':
-            # count tds
-            cells = [c.get_text(strip=True) for c in node.find_all(
-                ['td', 'th'], recursive=False)]
-            return f"| {' | '.join(cells)} |\n"
+            return f"| {' | '.join(row_cells(node))} |\n"
         if node.name == 'table':
-            # Try to add a separator line after first row if it looks like a header
-            rows = inner_text.strip().split('\n')
-            if rows:
-                cols_count = rows[0].count('|') - 1
-                if cols_count > 0:
-                    # rough approx
-                    sep = "| " + " | ".join(["---"] * int(cols_count/2)) + " |"
-                    # Actually, the traverse of TR returns newline terminated strings.
-                    # Let's just return what we gathered.
-                    pass
-            return f"\n\n{inner_text}\n\n"
+            carried: dict[int, int] = {}
+            rows = [
+                cells for cells in (
+                    row_cells(tr, carried) for tr in node.find_all('tr')
+                    if tr.find_parent('table') is node
+                ) if cells
+            ]
+            if not rows:
+                return f"\n\n{inner_text}\n\n"
+            width = max(len(cells) for cells in rows)
+            rows = [cells + [''] * (width - len(cells)) for cells in rows]
+            lines = [f"| {' | '.join(cells)} |" for cells in rows]
+            lines.insert(1, '| ' + ' | '.join(['---'] * width) + ' |')
+            caption = node.find('caption')
+            caption_text = (
+                fold(caption) if caption is not None and caption.find_parent('table') is node
+                else ''
+            )
+            lead = f"{caption_text}\n\n" if caption_text else ''
+            return f"\n\n{lead}" + '\n'.join(lines) + "\n\n"
 
         return f"{prefix}{inner_text}{suffix}"
 
@@ -718,12 +1273,180 @@ def simple_html_to_markdown_traversal(soup: Tag | BeautifulSoup | None) -> str:
     return md or ""
 
 
-def process_url(url: str, output_file: str | None = None, no_images: bool = False, filter_images: bool = False, raw: bool = False) -> tuple[bool, str, str | None, str | None]:
-    """Fetch, convert, and save one web page as Markdown."""
+PLAIN_TEXT_SUFFIXES = (".md", ".markdown", ".txt")
+
+
+def is_plain_text_document(url: str, body: str) -> bool:
+    """Return whether a fetched URL is raw Markdown / plain text, not HTML.
+
+    A raw file such as ``.../CHANGELOG.md`` on raw.githubusercontent.com is
+    already Markdown; running it through the HTML extractor loses the file or
+    fails on a missing body. The URL suffix decides, guarded by the absence of
+    an HTML document tag near the top of the body.
+    """
+    path = urlparse(url).path.lower()
+    if not path.endswith(PLAIN_TEXT_SUFFIXES):
+        return False
+    head = body[:4096].lower()
+    return "<html" not in head and "<body" not in head and "<!doctype html" not in head
+
+
+def _save_plain_text_document(
+    url: str, body: str, output_file: str | None,
+) -> tuple[bool, str, str | None, str | None]:
+    stem = os.path.splitext(os.path.basename(urlparse(url).path))[0]
+    output_path = output_file or os.path.join(
+        CONFIG["output_dir"], f"{derive_base_name(stem, url)}.md",
+    )
+    output_dirname = os.path.dirname(output_path) or "."
+    os.makedirs(output_dirname, exist_ok=True)
+    header = (
+        "<!--\n"
+        f"  Source: {url}\n"
+        f"  Crawled: {datetime.datetime.now().isoformat()}\n"
+        "  Format: raw Markdown / plain text saved verbatim\n"
+        "-->\n\n"
+    )
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(header + body)
+    profile_path = write_conversion_profile_best_effort(
+        input_path=url,
+        markdown_path=output_path,
+        converter="web_to_md.py",
+        conversion_type="web",
+        asset_dir=None,
+    )
+    print(f"   [OK] Raw Markdown / plain text: {len(body)} chars saved verbatim")
+    print(f"   [OK] Saved: {output_path}")
+    if profile_path:
+        print(f"   [OK] Conversion profile: {profile_path}")
+    return True, url, None, output_path
+
+
+_DOCUMENT_CONTENT_TYPES = {
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/msword": ".doc",
+    "application/vnd.ms-excel": ".xls",
+    "application/epub+zip": ".epub",
+}
+_DOCUMENT_URL_SUFFIXES = frozenset(
+    PDF_SUFFIXES | EXCEL_SUFFIXES | LEGACY_EXCEL_SUFFIXES | PRESENTATION_SUFFIXES
+    | (DOC_SUFFIXES - {".html", ".htm"})
+)
+
+
+def remote_document_suffix(url: str, content_type: str, head: bytes) -> str | None:
+    """Return the file suffix when a fetched URL is a document, not an HTML page.
+
+    A ``.pdf`` URL (or a suffix-less download that answers ``application/pdf``)
+    has no HTML body; the HTML extractor would fail on it. The body magic and
+    the Content-Type decide first, then the URL suffix, unless the server
+    explicitly answered with HTML (a viewer page at a document-looking URL).
+    """
+    if head.startswith(b"%PDF-"):
+        return ".pdf"
+    ctype = content_type.split(";")[0].strip().lower()
+    if ctype in _DOCUMENT_CONTENT_TYPES:
+        return _DOCUMENT_CONTENT_TYPES[ctype]
+    if ctype.startswith("text/html") or ctype == "application/xhtml+xml":
+        return None
+    suffix = os.path.splitext(urlparse(url).path)[1].lower()
+    return suffix if suffix in _DOCUMENT_URL_SUFFIXES else None
+
+
+def _convert_remote_document(
+    url: str, body: bytes, suffix: str, output_file: str | None,
+    download_images: bool = True,
+    no_images: bool = False, filter_images: bool = False, raw: bool = False,
+) -> tuple[bool, str, str | None, str | None]:
+    """Save a downloaded document beside its Markdown and run its own converter."""
+    stem = os.path.splitext(os.path.basename(urlparse(url).path))[0]
+    output_path = output_file or os.path.join(
+        CONFIG["output_dir"], f"{derive_base_name(stem, url)}.md",
+    )
+    output_dirname = os.path.dirname(output_path) or "."
+    os.makedirs(output_dirname, exist_ok=True)
+    base_name = os.path.splitext(os.path.basename(output_path))[0]
+    local_path = os.path.join(output_dirname, f"{base_name}{suffix}")
+    with open(local_path, "wb") as f:
+        f.write(body)
+    print(f"   [OK] Document: {len(body)} bytes saved to {local_path}")
+
+    route = build_conversion_command(
+        local_path, output_path,
+        pdf_image_mode=None if download_images else "none",
+        extra_args=(["--no-images"] if no_images else
+                    ["--filter-images"] if filter_images else []) +
+                   (["--raw"] if raw and suffix not in {".xlsx", ".xlsm"} else []),
+    )
+    print(f"   [>>] {route.script_name} {local_path}")
+    sys.stdout.flush()
+    rc = subprocess.run(route.command).returncode
+    if rc != 0 or not os.path.isfile(output_path):
+        return False, url, f"{route.script_name} exited with {rc}", None
+    record_source_url(output_path, url)
+    return True, url, None, output_path
+
+
+_META_REFRESH_RE = re.compile(
+    r"^\s*(\d+(?:\.\d+)?)\s*[;,]\s*url\s*=\s*['\"]?([^'\"]+)", re.IGNORECASE)
+
+
+def _meta_refresh_target(soup: BeautifulSoup, base_url: str) -> str | None:
+    """Return the http(s) target of an immediate `<meta http-equiv="refresh">`."""
+    meta = soup.find("meta", attrs={"http-equiv": re.compile(r"^refresh$", re.IGNORECASE)})
+    match = _META_REFRESH_RE.match(meta.get("content", "")) if meta else None
+    if not match or float(match.group(1)) > 5:
+        return None
+    target = urljoin(base_url, match.group(2).strip())
+    return target if urlparse(target).scheme in {"http", "https"} else None
+
+
+def process_url(
+    url: str,
+    output_file: str | None = None,
+    *,
+    download_images: bool = True,
+    _refresh_hops: int = 0,
+    no_images: bool = False,
+    filter_images: bool = False,
+    raw: bool = False,
+) -> tuple[bool, str, str | None, str | None]:
+    """Fetch, convert, and save one web page as Markdown.
+
+    Returns (success, url, error, output_path). output_path is the actual saved
+    Markdown path (derived from the article title when no output_file is given),
+    so a caller can locate a title-named file it did not choose upfront.
+    """
+    download_images = download_images and not no_images
     print(f"\n[Fetching] {url}")
     try:
-        html = fetch_url(url)
+        response = fetch_response(url)
+        suffix = remote_document_suffix(
+            response.url, response.headers.get("Content-Type", ""), response.content[:8])
+        if suffix:
+            return _convert_remote_document(
+                url, response.content, suffix, output_file, download_images,
+                no_images=no_images, filter_images=filter_images, raw=raw,
+            )
+        html, page_url = _decode_response_text(response), response.url
+        if is_plain_text_document(url, html):
+            return _save_plain_text_document(url, html, output_file)
         soup = BeautifulSoup(html, 'html.parser')
+        base = soup.find('base', href=True)
+        base_url = urljoin(page_url, base['href']) if base else page_url
+        refresh_url = _meta_refresh_target(soup, base_url)
+        if refresh_url and refresh_url != page_url and _refresh_hops < 3:
+            print(f"   [>>] Meta refresh: {refresh_url}")
+            ok, _, error, saved = process_url(
+                refresh_url, output_file,
+                download_images=download_images, _refresh_hops=_refresh_hops + 1,
+                no_images=no_images, filter_images=filter_images, raw=raw,
+            )
+            return ok, url, error, saved
 
         # Extract Metadata
         metadata = extract_metadata(soup, url)
@@ -745,46 +1468,54 @@ def process_url(url: str, output_file: str | None = None, no_images: bool = Fals
         image_dir = os.path.join(output_dirname, f"{base_name}_files")
         rel_image_prefix = os.path.relpath(image_dir, output_dirname)
 
-        # Extract Content: default uses trafilatura main-content extraction;
-        # --raw falls back to the heuristic CMS-selector scoring which keeps
-        # more boilerplate (closer to the original page structure).
+        # Extract Content
         content_div = None
-        if not raw and _TRAFILATURA_AVAILABLE:
+        if not raw and trafilatura is not None:
             try:
                 extracted_html = trafilatura.extract(
-                    html,
-                    output_format='html',
-                    favor_recall=False,
-                    include_comments=False,
-                    include_tables=True,
-                    include_images=True,
+                    html, output_format="html", favor_recall=False,
+                    include_comments=False, include_tables=True,
+                    include_images=True, include_links=True,
                 )
                 if extracted_html:
-                    content_div = BeautifulSoup(extracted_html, 'html.parser')
-                    print("   [OK] Content extracted by trafilatura")
-            except Exception as e:
-                print(f"   [WARN] trafilatura failed, falling back to heuristic: {e}")
+                    content_div = BeautifulSoup(extracted_html, "html.parser")
+            except Exception as exc:
+                print(f"   [WARN] trafilatura failed, falling back to heuristic: {exc}")
         if content_div is None:
-            content_div = find_main_content(soup)
-            if not raw and not _TRAFILATURA_AVAILABLE:
-                print("   [HINT] Install 'trafilatura' for cleaner main-content extraction: pip install trafilatura")
+            content_div = (soup.body or soup) if raw else find_main_content(soup)
+            if not raw and trafilatura is None:
+                print("   [HINT] Install trafilatura for main-content extraction")
 
-        image_sources: list[dict] = []
-        if no_images:
+
+        # Download images and rewrite src before markdown conversion
+        image_count = 0
+        if download_images:
+            image_count = download_and_rewrite_images(
+                content_div, base_url, image_dir, rel_image_prefix, filter_images=filter_images)
+        elif no_images:
             if content_div is not None:
-                for img in content_div.find_all("img"):
-                    img.decompose()
+                for image in content_div.find_all('img'):
+                    image.decompose()
         else:
-            # Download images and rewrite src before markdown conversion
-            image_count, image_sources = download_and_rewrite_images(
-                content_div, url, image_dir, rel_image_prefix, filter_images=filter_images)
-            if image_count:
-                print(f"   [OK] Images: {image_count} saved to {image_dir}")
+            rewrite_images_to_remote_urls(content_div, base_url)
+        if image_count:
+            print(f"   [OK] Images: {image_count} saved to {image_dir}")
 
         # Convert to MD
         # Note: We pass the element to our traversal function
-        markdown_text = simple_html_to_markdown_traversal(content_div)
+        markdown_text = simple_html_to_markdown_traversal(content_div, base_url)
         print(f"   [OK] Content: {len(markdown_text)} chars")
+        warnings = []
+        if not markdown_text.strip():
+            warnings.append(
+                "no readable body text extracted; the page may render its "
+                "content with scripts or link to it elsewhere")
+            print(f"   [WARN] {warnings[0]}")
+        else:
+            shortfall = _body_shortfall_warning(markdown_text, _page_visible_text(soup))
+            if shortfall:
+                warnings.append(shortfall)
+                print(f"   [WARN] {shortfall}")
 
         # Construct content
         final_output = []
@@ -810,33 +1541,18 @@ def process_url(url: str, output_file: str | None = None, no_images: bool = Fals
 
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(full_content)
-
-        if image_sources:
-            sources_path = os.path.join(image_dir, "image_sources.json")
-            with open(sources_path, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "schema": "markdown-conversion.image_sources.v1",
-                        "source_page_url": url,
-                        "items": image_sources,
-                    },
-                    f,
-                    ensure_ascii=False,
-                    indent=2,
-                )
-                f.write("\n")
-            print(f"   [OK] Image sources: {sources_path}")
-
-        profile_path = write_source_profile(
+        profile_path = write_conversion_profile_best_effort(
             input_path=url,
             markdown_path=output_path,
             converter="web_to_md.py",
             conversion_type="web",
-            asset_dir=image_dir if os.path.exists(image_dir) else None,
+            asset_dir=image_dir if image_count else None,
+            warnings=warnings,
         )
-        print(f"   [OK] Conversion profile: {profile_path}")
 
         print(f"   [OK] Saved: {output_path}")
+        if profile_path:
+            print(f"   [OK] Conversion profile: {profile_path}")
         return True, url, None, output_path
 
     except Exception as e:
@@ -844,7 +1560,23 @@ def process_url(url: str, output_file: str | None = None, no_images: bool = Fals
         return False, url, str(e), None
 
 
-def main() -> None:
+def _write_emit_result(result_file: str, url: str, markdown_path: str) -> None:
+    """Write the actual saved path as JSON so a caller can locate the output."""
+    md = Path(markdown_path).resolve()
+    profile = profile_path_for(md)
+    payload = {
+        "input": url,
+        "markdown": str(md),
+        "conversion_profile": str(profile) if profile.is_file() else "",
+    }
+    try:
+        Path(result_file).write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except OSError as exc:
+        print(f"   [WARN] Could not write --emit-result: {exc}")
+
+
+def main(argv: list[str] | None = None) -> int:
     """Run the CLI entry point."""
     parser = argparse.ArgumentParser(
         description="Web to Markdown Converter (Python)")
@@ -854,30 +1586,35 @@ def main() -> None:
     parser.add_argument("-o", "--output", help="Output file (single URL only)")
     parser.add_argument("-d", "--dir", help="Output directory")
     parser.add_argument(
+        "--emit-result",
+        help="On success, write the saved output path as JSON to this file "
+             "(single-URL dispatcher use, so a title-named file can be located)")
+    parser.add_argument(
         "--no-images",
         action="store_true",
-        help="Skip image downloads; strip <img> from the parsed content",
+        help="Skip image downloads and references",
     )
     parser.add_argument(
-        "--filter-images",
+        "--insecure",
         action="store_true",
-        help="Filter decorative images (1x1 trackers, logos, low-info blocks)",
+        help="Disable TLS certificate verification (only for self-signed development targets)",
     )
     parser.add_argument(
-        "--raw",
+        "--allow-private-hosts",
         action="store_true",
-        help="Faithful reproduction: disable trafilatura main-content extraction (keeps more boilerplate)",
-    )
-    parser.add_argument(
-        "--emit-result",
-        help="Write a JSON result with the actual Markdown output path",
+        help="Allow pages, images, and redirect targets on loopback, link-local, "
+             "and private networks (intranet or localhost pages you trust)",
     )
 
-    args = parser.parse_args()
-
+    parser.add_argument("--filter-images", action="store_true", help="Filter decorative images")
+    parser.add_argument("--raw", action="store_true", help="Keep the full HTML body")
+    args = parser.parse_args(argv)
     if args.no_images and args.filter_images:
-        print("Error: --no-images and --filter-images are mutually exclusive.")
-        sys.exit(2)
+        parser.error("--no-images and --filter-images are mutually exclusive")
+    CONFIG["insecure"] = args.insecure
+    CONFIG["allow_private_hosts"] = args.allow_private_hosts
+    if args.insecure:
+        print("[WARN] TLS certificate verification disabled (--insecure)", file=sys.stderr)
 
     if args.dir:
         CONFIG["output_dir"] = args.dir
@@ -893,47 +1630,36 @@ def main() -> None:
                          and not l.strip().startswith("#")]
                 targets.extend(lines)
         else:
-            print(f"Error: File {args.file} not found")
+            print(f"Error: File {args.file} not found", file=sys.stderr)
+            return 1
 
     if not targets:
-        parser.print_help()
-        sys.exit(0)
+        parser.print_usage(sys.stderr)
+        print(
+            "web_to_md.py: error: at least one URL or --file is required",
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.output and len(targets) > 1:
+        print(
+            "web_to_md.py: error: -o/--output names one Markdown file and takes "
+            "one URL; for several URLs pass --dir <output directory> instead",
+            file=sys.stderr,
+        )
+        return 2
 
     results = []
     for i, url in enumerate(targets):
-        # Allow specific output file only if 1 URL
-        out = args.output if (len(targets) == 1 and args.output) else None
-        success, url, err, markdown_path = process_url(
+        out = args.output or None
+        success, url, err, out_path = process_url(
             url,
             out,
-            no_images=args.no_images,
-            filter_images=args.filter_images,
-            raw=args.raw,
+            no_images=args.no_images, filter_images=args.filter_images, raw=args.raw,
         )
-        results.append((success, url, err, markdown_path))
-
-    if args.emit_result:
-        emitted = {
-            "schema": "markdown-conversion.web_result.v1",
-            "results": [
-                {
-                    "success": success,
-                    "url": url,
-                    "error": err or "",
-                    "markdown": markdown_path or "",
-                }
-                for success, url, err, markdown_path in results
-            ],
-        }
-        successful_paths = [
-            markdown_path for success, _url, _err, markdown_path in results
-            if success and markdown_path
-        ]
-        if len(successful_paths) == 1:
-            emitted["markdown"] = successful_paths[0]
-        with open(args.emit_result, "w", encoding="utf-8") as f:
-            json.dump(emitted, f, ensure_ascii=False, indent=2)
-            f.write("\n")
+        results.append((success, url, err))
+        if args.emit_result and success and out_path:
+            _write_emit_result(args.emit_result, url, out_path)
 
     # Summary
     success_count = sum(1 for r in results if r[0])
@@ -948,11 +1674,9 @@ def main() -> None:
         for r in results:
             if not r[0]:
                 print(f"   - {r[1]}: {r[2]}")
-        sys.exit(1)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    # Disable warnings for verify=False if needed, though often useful to see
-    import urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    main()
+    raise SystemExit(main())

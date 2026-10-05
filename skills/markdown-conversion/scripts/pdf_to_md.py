@@ -5,24 +5,39 @@ Uses PyMuPDF to extract PDF text content and convert to Markdown format.
 Supports heading levels, bold, italic, and list detection.
 """
 
+from __future__ import annotations
+
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sys
+import unicodedata
 from pathlib import Path
 from collections import Counter
 
-try:
-    import fitz  # PyMuPDF
-except ImportError:
-    print("[ERROR] PyMuPDF not installed. Run: pip install PyMuPDF", file=sys.stderr)
-    sys.exit(1)
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
 
-# Local sibling module — kept private to this skill.
-sys.path.insert(0, str(Path(__file__).parent))
-from _image_filter import should_keep_image as _should_keep_image_generic  # noqa: E402
+from _image_filter import should_keep_image as _should_keep_image_generic
+from _batch import run_path_batch  # noqa: E402
+from _conversion_profile import write_conversion_profile_best_effort  # noqa: E402
+
+
+# Help must not depend on the optional conversion packages: a stdlib-only
+# interpreter still gets the argparse usage .
+_HELP_REQUESTED = __name__ == "__main__" and any(
+    arg in {"-h", "--help"} for arg in sys.argv[1:]
+)
+if not _HELP_REQUESTED:
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        print("[ERROR] PyMuPDF not installed. Run: pip install PyMuPDF", file=sys.stderr)
+        sys.exit(1)
 
 FONT_BODY_SIZE = 12
 FONT_H1_SIZE = 24
@@ -30,18 +45,8 @@ FONT_H2_SIZE = 18
 FONT_H3_SIZE = 14
 HEADER_FOOTER_SAMPLE_LIMIT = 40
 HEADER_FOOTER_EDGE_SAMPLE_SIZE = 20
-VECTOR_FIGURE_DPI = 144
-VECTOR_CLUSTER_TOLERANCE = 6
-VECTOR_MIN_WIDTH = 72
-VECTOR_MIN_HEIGHT = 36
-VECTOR_MIN_AREA = 3000
-VECTOR_CLIP_PADDING = 4
-VECTOR_CAPTION_SEARCH_HEIGHT = 380
-VECTOR_CAPTION_HORIZONTAL_GAP = 90
-MAX_VECTOR_BACKGROUND_AREA_RATIO = 1.9
-FIGURE_CAPTION_RE = re.compile(r'^(?:Figure|Fig\.)\s*\d+\s*[:.]', re.IGNORECASE)
+HEADER_FOOTER_BAND_RATIO = 0.15
 CONTROL_CHARS_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
-LINE_SORT_BUCKET = 8.0
 
 
 def analyze_font_sizes(doc: fitz.Document) -> dict[str, float]:
@@ -129,6 +134,10 @@ def get_heading_level(size: float, size_map: dict, text: str = "",
     if len(text) > 80:
         return 0
 
+    # Exclusion: a bullet-led line is a list item, whatever its glyph size
+    if text[:1] in _BULLET_GLYPHS:
+        return 0
+
     # Exclusion: complete sentences ending with punctuation
     sentence_endings = '.。!！?？'
     if text and text[-1] in sentence_endings:
@@ -181,12 +190,77 @@ def format_span_text(text: str, flags: int) -> str:
     return text
 
 
+# Bullet glyphs a PDF sets as their own span; ``·`` (U+00B7) is common in
+# fact sheets, and a stray control character often follows the glyph.
+_BULLET_GLYPHS = '•●○◦▪▸►·‧∙・'
+
+
+def is_bullet_glyph_span(text: str) -> bool:
+    """Return whether a span holds only a bullet glyph (plus spaces / control characters)."""
+    stripped = re.sub(r'[\s\x00-\x1f]+', '', text)
+    return len(stripped) == 1 and stripped in _BULLET_GLYPHS
+
+
+# Below this many extracted text characters per page the PDF has no usable
+# text layer; a scan renders as one image per page and nothing else.
+SCANNED_PDF_TEXT_CHARS_PER_PAGE = 40
+
+
+def scanned_pdf_warnings(markdown: str, page_count: int, image_count: int) -> list[str]:
+    """Return a warning when the Markdown holds page images but almost no text.
+
+    ``[Done] Success`` with an empty Markdown body is worse than a failure:
+    a downstream reader takes the file as the converted source and concludes
+    the document has no usable content. The check counts text outside image
+    references and page comments against the page count.
+    """
+    if page_count <= 0:
+        return []
+    text_lines = [
+        line for line in markdown.splitlines()
+        if line.strip() and not line.lstrip().startswith(("![", "<!--"))
+    ]
+    text_chars = sum(len(line.strip()) for line in text_lines)
+    if text_chars >= SCANNED_PDF_TEXT_CHARS_PER_PAGE * page_count:
+        return []
+    if image_count < max(1, page_count // 2):
+        return []
+    return [
+        f"scanned PDF: {text_chars} text characters over {page_count} pages, "
+        f"{image_count} page images; no text layer was extracted, so the "
+        "clauses exist only inside the images (OCR or a text-layer copy is needed)"
+    ]
+
+
+# Two alef forms before a lam ("اإلحصاءات" for "الإحصاءات") is a lam-alef
+# ligature decomposed in the wrong order; well-formed Arabic practically
+# never has it. A run of tatweel marks where glyphs were dropped.
+_BROKEN_LAM_ALEF_RE = re.compile("[\u0627\u0623\u0625\u0622][\u0627\u0623\u0625\u0622]\u0644")
+
+
+def arabic_text_layer_warnings(markdown: str) -> list[str]:
+    """Warn when an Arabic text layer came out in visual order or lost glyphs."""
+    arabic = len(re.findall("[\u0600-\u06ff]", markdown))
+    if arabic < 200:
+        return []
+    broken = len(_BROKEN_LAM_ALEF_RE.findall(markdown))
+    tatweel = markdown.count("\u0640")
+    if broken < 5 and tatweel < arabic // 20:
+        return []
+    return [
+        f"Arabic text layer looks damaged: {broken} reversed lam-alef "
+        f"sequences and {tatweel} tatweel marks in {arabic} Arabic letters; "
+        "words, table cells, and numbers may be out of order or missing "
+        "letters, so check every figure against the PDF itself"
+    ]
+
+
 def detect_list_item(text: str) -> tuple:
     """Detect if the text is a list item. Returns (is_list, list_type, content)."""
     text = text.strip()
 
     ul_patterns = [
-        (r'^[•●○◦▪▸►]\s*', '-'),
+        (rf'^[{_BULLET_GLYPHS}][\s\x00-\x1f]*', '-'),
         (r'^[-–—]\s+', '-'),
         (r'^\*\s+', '-'),
     ]
@@ -195,7 +269,12 @@ def detect_list_item(text: str) -> tuple:
         if match:
             return (True, 'ul', marker + ' ' + text[match.end():])
 
-    ol_pattern = r'^(\d+)[.、)]\s*'
+    # ``83.2%`` at the start of a line is a decimal, not item 83: after a
+    # dot the marker must not be followed by another digit. a spaced clause number
+    # (a clause number set with a space, as Chinese standards do) is a
+    # heading path, not item 1 with the text a following digit group: a short digit group
+    # right after the marker, followed by a space or CJK, keeps the line as is.
+    ol_pattern = r'^(\d+)(?:[、)]|\.(?!\d)(?!\s*\d{1,2}(?:\.\s*\d+)*[\s\u4e00-\u9fff]))\s*'
     match = re.match(ol_pattern, text)
     if match:
         num = match.group(1)
@@ -213,34 +292,36 @@ def remove_page_footer(text: str) -> str:
     pattern_en = rf'\s*{months_en}\s+\d{{4}}\s+\d{{1,3}}\s*$'
     text = re.sub(pattern_en, '', text, flags=re.IGNORECASE)
 
-    # Chinese format: 2025年11月 8
+    # Chinese year/month format followed by a page number
     pattern_cn = r'\s*\d{4}年\d{1,2}月\s+\d{1,3}\s*$'
     text = re.sub(pattern_cn, '', text)
 
     return text.rstrip()
 
 
-def element_sort_fields(bbox: tuple | fitz.Rect) -> dict[str, float]:
-    """Return stable reading-order sort fields for an extracted element."""
-    rect = fitz.Rect(bbox)
-    center_y = (rect.y0 + rect.y1) / 2
-    return {
-        "y0": rect.y0,
-        "x0": rect.x0,
-        "sort_y": round(center_y / LINE_SORT_BUCKET) * LINE_SORT_BUCKET,
-    }
+def _header_footer_band(bbox: fitz.Rect, page_rect: fitz.Rect) -> str | None:
+    """Classify fully contained edge text; keep text crossing a band boundary."""
+    band_height = page_rect.height * HEADER_FOOTER_BAND_RATIO
+    if page_rect.y0 <= bbox.y0 and bbox.y1 <= page_rect.y0 + band_height:
+        return "header"
+    if page_rect.y1 - band_height <= bbox.y0 and bbox.y1 <= page_rect.y1:
+        return "footer"
+    return None
 
 
-def detect_headers_footers(doc: fitz.Document, threshold_ratio: float = 0.6) -> set[str]:
+def detect_headers_footers(
+    doc: fitz.Document, threshold_ratio: float = 0.6,
+) -> tuple[set[str], set[str]]:
     """
     Detect headers and footers statistically.
 
     Principle: Headers and footers typically appear at fixed positions (top or bottom)
     on each page with the same content. We collect top and bottom text from all pages,
     and if certain text appears more frequently than the threshold, it is treated as noise.
+    Return header and footer noise separately so filtering stays in the matching band.
     """
     if len(doc) < 3:
-        return set()
+        return set(), set()
 
     headers = []
     footers = []
@@ -255,12 +336,6 @@ def detect_headers_footers(doc: fitz.Document, threshold_ratio: float = 0.6) -> 
 
     for i in pages_to_scan:
         page = doc[i]
-        rect = page.rect
-        h = rect.height
-
-        # Define top and bottom regions (15% each)
-        top_rect = fitz.Rect(0, 0, rect.width, h * 0.15)
-        bottom_rect = fitz.Rect(0, h * 0.85, rect.width, h)
 
         # Extract text blocks
         blocks = page.get_text("blocks")
@@ -270,24 +345,46 @@ def detect_headers_footers(doc: fitz.Document, threshold_ratio: float = 0.6) -> 
             if not text:
                 continue
 
-            # Simple spatial determination
-            if b_rect.intersects(top_rect):
+            band = _header_footer_band(b_rect, page.rect)
+            if band == "header":
                 headers.append(text)
-            elif b_rect.intersects(bottom_rect):
+            elif band == "footer":
                 footers.append(text)
 
     # Count frequencies
-    noise_texts = set()
+    header_noise = set()
+    footer_noise = set()
     total_scanned = len(pages_to_scan)
 
-    for collection in [headers, footers]:
+    for collection, noise_texts in [(headers, header_noise), (footers, footer_noise)]:
         counter = Counter(collection)
         for text, count in counter.items():
             # if text appears in > 60% of scanned pages, mark as noise
             if count / total_scanned > threshold_ratio:
                 noise_texts.add(text)
 
-    return noise_texts
+    return header_noise, footer_noise
+
+
+def _is_hangul(char: str) -> bool:
+    return "\uac00" <= char <= "\ud7a3" or "\u1100" <= char <= "\u11ff" or "\u3130" <= char <= "\u318f"
+
+
+def join_wrapped_text(head: str, tail: str) -> str:
+    """Join two wrapped PDF lines.
+
+    Chinese and Japanese wrap between characters, so a break between wide
+    characters takes no space; Korean spaces its words and wraps at them, so
+    a break touching Hangul keeps one.
+    """
+    if (
+        head and tail
+        and unicodedata.east_asian_width(head[-1]) in {"W", "F"}
+        and unicodedata.east_asian_width(tail[0]) in {"W", "F"}
+        and not (_is_hangul(head[-1]) or _is_hangul(tail[0]))
+    ):
+        return head + tail
+    return f"{head} {tail}"
 
 
 def merge_adjacent_headings(elements: list) -> list:
@@ -327,6 +424,8 @@ def merge_adjacent_headings(elements: list) -> list:
             next_el = elements[j]
             if next_el.get("type") != 0 or not next_el.get("is_heading"):
                 break
+            if el.get("is_footer") or next_el.get("is_footer"):
+                break
 
             next_match = re.match(r'^(#{1,6})\s+(.+)$', next_el["content"])
             if not next_match or next_match.group(1) != level:
@@ -338,7 +437,7 @@ def merge_adjacent_headings(elements: list) -> list:
                 break
 
             # Merge
-            title_text += " " + next_text
+            title_text = join_wrapped_text(title_text, next_text)
             j += 1
 
         # Create merged element
@@ -350,12 +449,57 @@ def merge_adjacent_headings(elements: list) -> list:
     return merged
 
 
+# Image filtering thresholds
+MIN_IMAGE_PIXELS = 100       # Minimum pixel dimension (width AND height)
+MIN_IMAGE_AREA = 30000       # Minimum pixel area (e.g. 200x150)
+MIN_IMAGE_BYTES = 2048       # Minimum image data size (2KB)
+MIN_PAGE_RATIO = 0.05        # Minimum render size relative to page (5%)
+MIN_VISIBLE_IMAGE_WIDTH = 40
+MIN_VISIBLE_IMAGE_HEIGHT = 40
+MIN_VISIBLE_IMAGE_AREA_RATIO = 0.01
+MAX_ASPECT_RATIO = 12        # Maximum aspect ratio (filters decorative bars)
+MAX_LOW_INFO_BPP = 0.08      # Bytes-per-pixel threshold for low-info images
+MAX_LOW_INFO_AREA = 500000   # Area threshold: only apply bpp filter below this
+MIN_VECTOR_FIGURE_WIDTH = 100
+MIN_VECTOR_FIGURE_HEIGHT = 80
+MIN_VECTOR_FIGURE_AREA = 30000
+MAX_VECTOR_FIGURE_ASPECT_RATIO = 8
+VECTOR_FIGURE_PADDING = 4
+VECTOR_FIGURE_DPI = 180
+VECTOR_CAPTION_SEARCH_HEIGHT = 380
+VECTOR_CAPTION_HORIZONTAL_GAP = 90
+MAX_VECTOR_BACKGROUND_AREA_RATIO = 1.9
+# Caption delimiters: ``Figure 1:`` / ``Figure 1.`` (classic) and ``Figure 1 |``
+# (the DeepMind / Distill / Nature house style used by many ML papers, incl.
+# full-width ``｜``). Without the pipe variants, captioned vector figures route
+# to the generic per-drawing fallback, which discards fine-grained line plots
+# (each plot is hundreds of tiny primitives, none large enough on its own).
+FIGURE_CAPTION_RE = re.compile(r'^(?:Figure|Fig\.?)\s*\d+\s*[:.|｜]', re.IGNORECASE)
+
+
+TABLE_CAPTION_RE = re.compile(
+    r'^\u8868\s*\d+(?:\.\d+)*\s+(?!(?:\u7684|\u5217\u793a|\u6240\u793a|\u4e3a)).+'
+)
+TABLE_REFERENCE_PROSE_RE = re.compile(
+    r'^\u8868\s*\d+(?:\.\d+)*\s*(?:\u7684|\u5217\u793a|\u6240\u793a|\u4e3a)'
+)
+SECTION_HEADING_RE = re.compile(r'^\d+(?:\.\d+){1,3}\s+\S')
+NUMBER_RE = re.compile(r'[-+]?\d+(?:\.\d+)?')
+MODEL_COLUMN_RE = re.compile(r'^[（(]\d+[）)]$')
+TABLE_NOTE_PREFIX = '\u6ce8'
+TABLE_CONTINUATION_Y_RATIO = 0.88
+# A printed page number left between split table parts; trusted only next to a
+# ``<!-- Page N -->`` marker, never on its own.
+PRINTED_PAGE_NUMBER_RE = re.compile(r'\d{1,4}')
+TABLE_SCAN_BOTTOM_RATIO = 0.92
+
+
 def should_keep_image(
     block: dict[str, object],
     page_rect: fitz.Rect,
     seen_hashes: set[str] | None = None,
 ) -> bool:
-    """Filter out small, decorative, or duplicate images.
+    """Filter out small or decorative images.
 
     Thin adapter that maps a PyMuPDF image block onto the shared
     `_image_filter.should_keep_image` heuristics.
@@ -378,14 +522,6 @@ def should_keep_image(
     )
 
 
-def _overlap_ratio(rect: fitz.Rect, other: fitz.Rect) -> float:
-    """Return how much of rect is covered by other."""
-    area = rect.get_area()
-    if area <= 0:
-        return 0.0
-    return (rect & other).get_area() / area
-
-
 def _clip_rect_to_page(rect: fitz.Rect, page_rect: fitz.Rect) -> fitz.Rect:
     """Clamp a rectangle to the current PDF page."""
     return fitz.Rect(
@@ -394,6 +530,51 @@ def _clip_rect_to_page(rect: fitz.Rect, page_rect: fitz.Rect) -> fitz.Rect:
         min(page_rect.x1, rect.x1),
         min(page_rect.y1, rect.y1),
     )
+
+
+def _is_rect_contained(inner: fitz.Rect, outer: fitz.Rect, threshold: float = 0.9) -> bool:
+    """Return whether ``inner`` is mostly covered by ``outer``."""
+    inner_area = inner.get_area()
+    if inner_area <= 0:
+        return False
+    return ((inner & outer).get_area() / inner_area) >= threshold
+
+
+def _overlaps_table(rect: fitz.Rect, tab_rects: list[fitz.Rect]) -> bool:
+    """Skip vector regions that are already handled as extracted tables."""
+    rect_area = rect.get_area()
+    if rect_area <= 0:
+        return False
+    for tab_rect in tab_rects:
+        intersection = rect & tab_rect
+        if intersection.get_area() > 0.5 * min(rect_area, tab_rect.get_area()):
+            return True
+    return False
+
+
+def _is_white(color: tuple[float, ...] | None) -> bool:
+    """Return whether a PDF drawing color is visually white."""
+    if color is None:
+        return False
+    return all(channel >= 0.98 for channel in color[:3])
+
+
+def _is_background_drawing(drawing: dict[str, object]) -> bool:
+    """Identify white background rectangles that should not drive crops."""
+    return _is_white(drawing.get("fill")) and drawing.get("color") is None
+
+
+def find_figure_caption_rects(page: fitz.Page) -> list[fitz.Rect]:
+    """Return text-line rectangles that look like figure captions."""
+    caption_rects = []
+    for block in page.get_text("dict")["blocks"]:
+        if block.get("type") != 0:
+            continue
+        for line in block["lines"]:
+            text = "".join(span["text"] for span in line["spans"]).strip()
+            if FIGURE_CAPTION_RE.match(text):
+                caption_rects.append(fitz.Rect(line["bbox"]))
+    return caption_rects
 
 
 def _expand_rect(rect: fitz.Rect, padding: float, page_rect: fitz.Rect) -> fitz.Rect:
@@ -409,45 +590,12 @@ def _expand_rect(rect: fitz.Rect, padding: float, page_rect: fitz.Rect) -> fitz.
     )
 
 
-def _is_rect_contained(inner: fitz.Rect, outer: fitz.Rect, threshold: float = 0.9) -> bool:
-    """Return whether inner is mostly covered by outer."""
-    return _overlap_ratio(inner, outer) >= threshold
-
-
-def _is_white(color: tuple[float, ...] | None) -> bool:
-    """Return whether a PDF drawing color is visually white."""
-    if color is None:
-        return False
-    return all(channel >= 0.98 for channel in color[:3])
-
-
-def _is_background_drawing(drawing: dict[str, object]) -> bool:
-    """Identify white background rectangles that should not drive crops."""
-    return _is_white(drawing.get("fill")) and drawing.get("color") is None
-
-
 def _union_rects(rects: list[fitz.Rect]) -> fitz.Rect:
     """Return the bounding union for one or more rectangles."""
     result = fitz.Rect(rects[0])
     for rect in rects[1:]:
         result |= rect
     return result
-
-
-def find_figure_caption_rects(page: fitz.Page) -> list[fitz.Rect]:
-    """Return text-line rectangles that look like figure captions."""
-    caption_rects = []
-    for block in page.get_text("dict")["blocks"]:
-        if block.get("type") != 0:
-            continue
-        for line in block["lines"]:
-            text = "".join(
-                CONTROL_CHARS_RE.sub('', span["text"])
-                for span in line["spans"]
-            ).strip()
-            if FIGURE_CAPTION_RE.match(text):
-                caption_rects.append(fitz.Rect(line["bbox"]))
-    return caption_rects
 
 
 def _find_captioned_vector_figures(
@@ -476,206 +624,86 @@ def _find_captioned_vector_figures(
             continue
 
         content_rect = _union_rects(related)
-        figure_rect = content_rect
+        rect = content_rect
         for background_rect in background_rects:
             background_rect = _clip_rect_to_page(background_rect, page_rect)
             if not _is_rect_contained(content_rect, background_rect, threshold=0.95):
                 continue
             if background_rect.get_area() > content_rect.get_area() * MAX_VECTOR_BACKGROUND_AREA_RATIO:
                 continue
-            figure_rect = background_rect
+            rect = background_rect
             break
 
-        figure_rect = _expand_rect(figure_rect, 10, page_rect)
-        figure_rect.y1 = min(figure_rect.y1, caption_rect.y0 - 2)
-        if figure_rect.width >= VECTOR_MIN_WIDTH and figure_rect.height >= VECTOR_MIN_HEIGHT:
-            figure_rects.append(figure_rect)
+        rect = _expand_rect(rect, 10, page_rect)
+        rect.y1 = min(rect.y1, caption_rect.y0 - 2)
+        if rect.width >= MIN_VECTOR_FIGURE_WIDTH and rect.height >= MIN_VECTOR_FIGURE_HEIGHT:
+            figure_rects.append(rect)
 
     return figure_rects
 
 
-def detect_vector_figure_rects(page: fitz.Page) -> list[fitz.Rect]:
-    """Detect vector drawing regions that should be rasterized as figures."""
-    try:
-        drawings = page.get_drawings()
-    except Exception as exc:
-        print(f"  [WARN] Failed to inspect vector drawings on P{page.number + 1}: {exc}")
-        return []
+def detect_vector_figure_rects(page: fitz.Page, tab_rects: list[fitz.Rect]) -> list[fitz.Rect]:
+    """Detect large vector drawing regions that should be rasterized as figures.
 
+    Some academic PDFs store charts and diagrams as vector drawing commands,
+    not image XObjects. ``page.get_text("dict")`` exposes only raster image
+    blocks, so those figures need a separate drawing-region fallback.
+    """
+    candidates = []
+    page_rect = page.rect
+    caption_rects = find_figure_caption_rects(page)
     drawing_rects = []
     background_rects = []
-    for drawing in drawings:
+
+    for drawing in page.get_drawings():
         rect = drawing.get("rect")
         if not rect:
             continue
+
         rect = fitz.Rect(rect)
-        if rect.is_empty or rect.is_infinite:
+        if rect.is_empty:
             continue
+
         if _is_background_drawing(drawing):
             background_rects.append(rect)
-        else:
-            drawing_rects.append(rect)
-
-    caption_rects = find_figure_caption_rects(page)
-    captioned = _find_captioned_vector_figures(
-        page,
-        drawing_rects,
-        background_rects,
-        caption_rects,
-    )
-    if captioned:
-        return captioned
-
-    try:
-        return [
-            fitz.Rect(rect)
-            for rect in page.cluster_drawings(
-                drawings=drawings,
-                x_tolerance=VECTOR_CLUSTER_TOLERANCE,
-                y_tolerance=VECTOR_CLUSTER_TOLERANCE,
-            )
-        ]
-    except Exception as exc:
-        print(f"  [WARN] Failed to cluster vector drawings on P{page.number + 1}: {exc}")
-        return []
-
-
-def should_keep_vector_rect(
-    rect: fitz.Rect,
-    page_rect: fitz.Rect,
-    table_rects: list[fitz.Rect],
-    image_rects: list[fitz.Rect],
-    *,
-    filtered: bool,
-) -> bool:
-    """Filter vector drawing clusters before rendering them as images."""
-    if rect.is_empty or rect.is_infinite:
-        return False
-
-    width = rect.width
-    height = rect.height
-    if width < VECTOR_MIN_WIDTH or height < VECTOR_MIN_HEIGHT:
-        return False
-    if width * height < VECTOR_MIN_AREA:
-        return False
-
-    # Tables are already converted to Markdown; rendering their grid lines would
-    # duplicate content and add noisy screenshots.
-    for table_rect in table_rects:
-        if _overlap_ratio(rect, table_rect) > 0.6:
-            return False
-
-    # Avoid producing a second PNG for vector overlays sitting on top of an
-    # embedded raster image.
-    for image_rect in image_rects:
-        if _overlap_ratio(rect, image_rect) > 0.6:
-            return False
-
-    if filtered:
-        page_w = max(page_rect.width, 1)
-        page_h = max(page_rect.height, 1)
-        if width / page_w < 0.08 and height / page_h < 0.08:
-            return False
-
-    return True
-
-
-def count_text_lines_in_rect(page: fitz.Page, rect: fitz.Rect, threshold: float = 0.2) -> int:
-    """Count text lines substantially overlapping a rectangle."""
-    count = 0
-    for block in page.get_text("dict")["blocks"]:
-        if block.get("type") != 0:
             continue
-        for line in block["lines"]:
-            line_rect = fitz.Rect(line["bbox"])
-            if _overlap_ratio(line_rect, rect) > threshold:
-                count += 1
-    return count
 
+        drawing_rects.append(rect)
 
-def is_text_dominant_vector_rect(page: fitz.Page, rect: fitz.Rect) -> bool:
-    """Reject large vector clusters that are just page layout lines behind text."""
-    text_line_count = count_text_lines_in_rect(page, rect)
-    if text_line_count < 6:
-        return False
+    if caption_rects:
+        return _find_captioned_vector_figures(page, drawing_rects, background_rects, caption_rects)
 
-    page_rect = page.rect
-    width_ratio = rect.width / max(page_rect.width, 1)
-    height_ratio = rect.height / max(page_rect.height, 1)
-    return width_ratio > 0.55 and height_ratio > 0.12
+    for rect in drawing_rects:
+        rect = _expand_rect(rect, VECTOR_FIGURE_PADDING, page_rect)
+        rect = _clip_rect_to_page(rect, page_rect)
 
+        width = rect.width
+        height = rect.height
+        if width < MIN_VECTOR_FIGURE_WIDTH or height < MIN_VECTOR_FIGURE_HEIGHT:
+            continue
 
-def render_vector_rect(page: fitz.Page, rect: fitz.Rect, dpi: int = VECTOR_FIGURE_DPI) -> bytes:
-    """Render a vector drawing region to PNG bytes."""
-    clip = fitz.Rect(rect)
-    clip.x0 = max(page.rect.x0, clip.x0 - VECTOR_CLIP_PADDING)
-    clip.y0 = max(page.rect.y0, clip.y0 - VECTOR_CLIP_PADDING)
-    clip.x1 = min(page.rect.x1, clip.x1 + VECTOR_CLIP_PADDING)
-    clip.y1 = min(page.rect.y1, clip.y1 + VECTOR_CLIP_PADDING)
-    zoom = dpi / 72
-    pixmap = page.get_pixmap(
-        matrix=fitz.Matrix(zoom, zoom),
-        clip=clip,
-        alpha=False,
-    )
-    return pixmap.tobytes("png")
+        area = rect.get_area()
+        if area < MIN_VECTOR_FIGURE_AREA:
+            continue
 
+        aspect = max(width, height) / max(min(width, height), 1)
+        if aspect > MAX_VECTOR_FIGURE_ASPECT_RATIO:
+            continue
 
-def remove_text_inside_vector_images(
-    page_elements: list[dict[str, object]],
-    vector_rects: list[fitz.Rect],
-) -> list[dict[str, object]]:
-    """Drop text lines already captured inside rendered vector images."""
-    if not vector_rects:
-        return page_elements
+        if _overlaps_table(rect, tab_rects):
+            continue
 
-    filtered = []
-    for element in page_elements:
-        if element.get("type") == 0 and element.get("bbox"):
-            text_rect = fitz.Rect(element["bbox"])
-            if any(_overlap_ratio(text_rect, vector_rect) > 0.8 for vector_rect in vector_rects):
-                continue
-        filtered.append(element)
-    return filtered
+        candidates.append(rect)
 
+    candidates.sort(key=lambda r: r.get_area(), reverse=True)
 
-def table_shape_stats(table: object) -> tuple[int, int, int, float, float]:
-    """Return rows, columns, non-empty cells, density, and unique-text ratio."""
-    try:
-        rows_data = table.extract()
-    except Exception:
-        return 0, 0, 0, 0.0, 0.0
+    kept = []
+    for rect in candidates:
+        if any(_is_rect_contained(rect, existing) for existing in kept):
+            continue
+        kept.append(rect)
 
-    row_count = len(rows_data)
-    col_count = max((len(row) for row in rows_data), default=0)
-    total_cells = max(row_count * col_count, 1)
-    nonempty = [
-        str(cell).strip()
-        for row in rows_data
-        for cell in row
-        if str(cell or "").strip()
-    ]
-    nonempty_count = len(nonempty)
-    density = nonempty_count / total_cells
-    unique_ratio = len(set(nonempty)) / nonempty_count if nonempty_count else 0.0
-    return row_count, col_count, nonempty_count, density, unique_ratio
-
-
-def should_emit_pdf_table(table: object) -> bool:
-    """Reject layout-line false positives from PyMuPDF table detection."""
-    row_count, col_count, nonempty_count, density, unique_ratio = table_shape_stats(table)
-
-    if row_count < 2 or col_count < 2:
-        return False
-    if nonempty_count < 4:
-        return False
-    if density < 0.30:
-        return False
-    if col_count >= 12 and density < 0.45:
-        return False
-    if row_count >= 8 and col_count >= 8 and density < 0.55 and unique_ratio < 0.85:
-        return False
-    return True
+    return sorted(kept, key=lambda r: (r.y0, r.x0))
 
 
 def clean_text(text: str) -> str:
@@ -699,6 +727,737 @@ def clean_text(text: str) -> str:
     return '\n'.join(cleaned_lines)
 
 
+def _extract_text_lines(page: fitz.Page) -> list[tuple[fitz.Rect, str]]:
+    """Return text lines with their page rectangles in reading order."""
+    lines = []
+    for block in page.get_text("dict")["blocks"]:
+        if block.get("type") != 0:
+            continue
+        for line in block["lines"]:
+            text = "".join(span["text"] for span in line["spans"]).strip()
+            if text:
+                lines.append((fitz.Rect(line["bbox"]), text))
+    return sorted(lines, key=lambda item: (item[0].y0, item[0].x0))
+
+
+def _is_table_caption(text: str) -> bool:
+    """Return whether a line is a real table caption, not prose citing a table."""
+    return bool(TABLE_CAPTION_RE.match(text.strip()))
+
+
+def _caption_table_start_y(
+    caption_rect: fitz.Rect,
+    lines: list[tuple[fitz.Rect, str]],
+) -> float:
+    """Start below a caption and its adjacent English translation line."""
+    start_y = caption_rect.y1 + 1
+    for rect, text in lines:
+        if rect.y0 < caption_rect.y1 - 1 or rect.y0 > caption_rect.y1 + 35:
+            continue
+        if text.startswith("Table"):
+            start_y = max(start_y, rect.y1 + 1)
+    return start_y
+
+
+def _looks_like_numeric_table_line(text: str) -> bool:
+    """Detect long data rows so they are not mistaken for prose boundaries."""
+    numbers = NUMBER_RE.findall(text)
+    if len(numbers) >= 3:
+        return True
+    tokens = [token for token in re.split(r'\s+', text.strip()) if token]
+    return len(tokens) >= 4 and len(numbers) >= 2
+
+
+def _is_table_region_boundary(
+    rect: fitz.Rect,
+    text: str,
+    page: fitz.Page,
+    start_y: float,
+) -> bool:
+    """Return whether a line likely starts prose after a text-detected table."""
+    text = text.strip()
+    if rect.y0 < start_y + 45:
+        return False
+    if text.startswith(TABLE_NOTE_PREFIX):
+        return True
+    if SECTION_HEADING_RE.match(text):
+        return True
+    if TABLE_REFERENCE_PROSE_RE.match(text):
+        return True
+    if _looks_like_numeric_table_line(text):
+        return False
+
+    width_ratio = rect.width / page.rect.width if page.rect.width > 0 else 0
+    return len(text) >= 26 and width_ratio > 0.52 and rect.x0 < page.rect.width * 0.25
+
+
+def _table_region_bottom(
+    page: fitz.Page,
+    lines: list[tuple[fitz.Rect, str]],
+    start_y: float,
+) -> float:
+    """Find a conservative bottom edge for a caption-guided text table scan."""
+    for rect, text in lines:
+        if rect.y0 <= start_y:
+            continue
+        if _is_table_region_boundary(rect, text, page, start_y):
+            return max(start_y + 20, rect.y0 - 2)
+    return page.rect.height * TABLE_SCAN_BOTTOM_RATIO
+
+
+def _normalize_table_cell(value: object) -> str:
+    """Normalize one extracted table cell for Markdown output."""
+    if value is None:
+        return ""
+    text = CONTROL_CHARS_RE.sub('', str(value))
+    text = re.sub(r'\s*\n\s*', '<br>', text.strip())
+    text = re.sub(r'[ \t]+', ' ', text)
+    return text.replace('|', r'\|')
+
+
+def _clean_table_rows(rows: list[list[object]]) -> list[list[str]]:
+    """Remove empty rows / columns from PyMuPDF table extraction output."""
+    normalized = [[_normalize_table_cell(cell) for cell in row] for row in rows]
+    normalized = [row for row in normalized if any(cell for cell in row)]
+    if not normalized:
+        return []
+
+    max_cols = max(len(row) for row in normalized)
+    padded = [row + [""] * (max_cols - len(row)) for row in normalized]
+    keep_cols = [
+        idx
+        for idx in range(max_cols)
+        if any(row[idx] for row in padded)
+    ]
+    if len(keep_cols) < 2:
+        return []
+    return _postprocess_table_rows([[row[idx] for idx in keep_cols] for row in padded])
+
+
+def _nonempty_cell_indexes(row: list[str]) -> list[int]:
+    """Return indexes of non-empty cells in a row."""
+    return [idx for idx, cell in enumerate(row) if cell]
+
+
+def _merge_label_underscore_rows(rows: list[list[str]]) -> list[list[str]]:
+    """Join rows where PDF extraction split a leading underscore from a label."""
+    merged = []
+    for row in rows:
+        nonempty = _nonempty_cell_indexes(row)
+        if nonempty == [0] and row[0] == "_" and merged and merged[-1][0]:
+            merged[-1][0] = f"_{merged[-1][0]}"
+            continue
+        merged.append(row)
+    return merged
+
+
+def _merge_single_cell_continuations(rows: list[list[str]]) -> list[list[str]]:
+    """Merge wrapped single-cell table rows into the previous row."""
+    merged: list[list[str]] = []
+    for row in rows:
+        nonempty = _nonempty_cell_indexes(row)
+        if (
+            len(nonempty) == 1
+            and nonempty[0] > 0
+            and merged
+            and not MODEL_COLUMN_RE.match(row[nonempty[0]])
+        ):
+            index = nonempty[0]
+            separator = "<br>" if merged[-1][index] else ""
+            merged[-1][index] = f"{merged[-1][index]}{separator}{row[index]}"
+            continue
+        merged.append(row)
+    return merged
+
+
+def _looks_like_model_row(row: list[str]) -> bool:
+    """Return whether a row contains model-number table headings."""
+    values = [cell for cell in row[1:] if cell]
+    return len(values) >= 2 and all(MODEL_COLUMN_RE.match(cell) for cell in values)
+
+
+def _looks_like_outcome_row(row: list[str]) -> bool:
+    """Return whether a row contains regression outcome labels."""
+    values = [cell for cell in row[1:] if cell]
+    if len(values) < 2:
+        return False
+    short_values = [cell for cell in values if len(cell) <= 12 and not NUMBER_RE.search(cell)]
+    return len(short_values) == len(values)
+
+
+def _flatten_regression_header(rows: list[list[str]]) -> list[list[str]]:
+    """Flatten multi-line regression headings into one Markdown header row."""
+    if len(rows) < 3:
+        return rows
+
+    if (
+        len(rows) >= 2
+        and rows[0][0]
+        and not any(rows[0][1:])
+        and _looks_like_model_row(rows[1])
+    ):
+        outcome = rows[0][0]
+        header = ["变量"]
+        header.extend(
+            f"{model} {outcome}".strip()
+            for model in rows[1][1:]
+        )
+        return [header] + rows[2:]
+
+    header_offset = 0
+    if not _looks_like_model_row(rows[0]) and _looks_like_model_row(rows[1]):
+        header_offset = 1
+
+    if not _looks_like_model_row(rows[header_offset]):
+        return rows
+    if len(rows) <= header_offset + 1 or not _looks_like_outcome_row(rows[header_offset + 1]):
+        return rows
+
+    model_row = rows[header_offset]
+    outcome_row = rows[header_offset + 1]
+    header = ["变量"]
+    for idx, model in enumerate(model_row[1:]):
+        pieces = []
+        if model:
+            pieces.append(model)
+        if idx + 1 < len(outcome_row) and outcome_row[idx + 1]:
+            pieces.append(outcome_row[idx + 1])
+        header.append(" ".join(pieces).strip())
+    return [header] + rows[header_offset + 2:]
+
+
+def _fix_paired_sample_t_table(rows: list[list[str]]) -> list[list[str]]:
+    """Collapse multi-row paired-sample T-test headings into readable columns."""
+    if not rows or not any("成对差分" in cell for cell in rows[0]):
+        return rows
+    body = [row for row in rows if row and row[0].startswith("对")]
+    if len(body) < 1:
+        return rows
+    header = [
+        "配对",
+        "变量",
+        "均值",
+        "标准差",
+        "均值的标准误",
+        "差分95%置信区间下限",
+        "差分95%置信区间上限",
+        "t",
+        "Df",
+        "Sig.(双侧)",
+    ]
+    fixed_rows = [header]
+    for row in body:
+        fixed_rows.append(row[:len(header)] + [""] * max(0, len(header) - len(row)))
+    return fixed_rows
+
+
+def _fix_variable_definition_table(rows: list[list[str]]) -> list[list[str]]:
+    """Repeat variable-category labels for common variable definition tables."""
+    if not rows or rows[0] != ["变量类型", "变量名称", "符号", "变量说明"]:
+        return rows
+
+    fixed = [rows[0]]
+    for row in rows[1:]:
+        if not any(row):
+            continue
+        name = row[1] if len(row) > 1 else ""
+        symbol = row[2] if len(row) > 2 else ""
+        description = row[3] if len(row) > 3 else ""
+        if not name or not symbol:
+            continue
+
+        if symbol in {"R＆D", "Fixed", "Hc"}:
+            category = "被解释变量"
+        elif symbol == "Vat":
+            category = "解释变量"
+        else:
+            category = "控制变量"
+        fixed.append([category, name, symbol, description])
+    return fixed
+
+
+def _fix_correlation_triangle(rows: list[list[str]]) -> list[list[str]]:
+    """Restore the missing last self-correlation column in triangular tables."""
+    if len(rows) < 4 or not rows[0] or rows[0][0] != "变量":
+        return rows
+    body_names = [row[0] for row in rows[1:] if row and row[0]]
+    header_names = rows[0][1:]
+    if len(body_names) != len(header_names) + 1:
+        return rows
+    missing_name = body_names[-1]
+    fixed = [rows[0] + [missing_name]]
+    for row in rows[1:-1]:
+        fixed.append(row + [""])
+    fixed.append(rows[-1] + ["1"])
+    return fixed
+
+
+def _postprocess_table_rows(rows: list[list[str]]) -> list[list[str]]:
+    """Apply Markdown-oriented cleanup to extracted table rows."""
+    rows = _merge_label_underscore_rows(rows)
+    rows = _merge_single_cell_continuations(rows)
+    rows = _fix_variable_definition_table(rows)
+    rows = _fix_paired_sample_t_table(rows)
+    rows = _flatten_regression_header(rows)
+    rows = _fix_correlation_triangle(rows)
+    return rows
+
+
+def _rows_to_markdown(rows: list[list[str]]) -> str:
+    """Convert cleaned table rows to GitHub-flavored Markdown."""
+    if len(rows) < 2:
+        return ""
+    col_count = max(len(row) for row in rows)
+    padded = [row + [""] * (col_count - len(row)) for row in rows]
+    header = padded[0]
+    body = padded[1:]
+    lines = [
+        "|" + "|".join(header) + "|",
+        "|" + "|".join(["---"] * col_count) + "|",
+    ]
+    lines.extend("|" + "|".join(row) + "|" for row in body)
+    return "\n".join(lines)
+
+
+def _table_to_markdown(tab: object) -> str:
+    """Convert a PyMuPDF table object to cleaned Markdown."""
+    try:
+        rows = tab.extract() or []
+    except Exception:
+        return ""
+    return _rows_to_markdown(_clean_table_rows(rows))
+
+
+def _is_valid_table_markdown(markdown: str) -> bool:
+    """Return whether generated Markdown contains a minimally useful table."""
+    return markdown.count("\n") >= 2 and markdown.startswith("|")
+
+
+def _markdown_col_count(markdown: str) -> int:
+    """Return the column count implied by the first Markdown table row."""
+    first_line = markdown.splitlines()[0] if markdown else ""
+    return max(0, first_line.count("|") - 1)
+
+
+def _append_table_markdown_candidate(
+    candidates: list[dict[str, object]],
+    bbox: fitz.Rect,
+    markdown: str,
+    method: str,
+    replace_narrow: bool = False,
+) -> None:
+    """Append or replace a table candidate after overlap deduplication."""
+    if not _is_valid_table_markdown(markdown):
+        return
+
+    for index, candidate in enumerate(candidates):
+        existing = candidate["bbox"]
+        if not isinstance(existing, fitz.Rect):
+            continue
+        overlap = (bbox & existing).get_area()
+        if overlap <= 0.8 * min(bbox.get_area(), existing.get_area()):
+            continue
+
+        existing_markdown = str(candidate.get("content", ""))
+        can_replace = (
+            replace_narrow
+            and bbox.width > existing.width * 1.4
+            and _markdown_col_count(markdown) >= _markdown_col_count(existing_markdown)
+        )
+        if can_replace:
+            candidates[index] = {
+                "bbox": bbox,
+                "content": markdown,
+                "method": method,
+            }
+        return
+
+    candidates.append({
+        "bbox": bbox,
+        "content": markdown,
+        "method": method,
+    })
+
+
+def _add_table_candidate(
+    candidates: list[dict[str, object]],
+    tab: object,
+    method: str,
+) -> None:
+    """Append a table candidate if it has useful Markdown and is not duplicate."""
+    markdown = _table_to_markdown(tab)
+    if not _is_valid_table_markdown(markdown):
+        return
+
+    bbox = fitz.Rect(tab.bbox)
+    _append_table_markdown_candidate(candidates, bbox, markdown, method)
+
+
+ORPHAN_CELL_MAX_CHARS = 24
+ORPHAN_COLUMN_GAP = 12.0
+ORPHAN_ROW_COVERAGE = 0.6
+
+
+def _cluster_orphan_columns(cells: list[tuple[fitz.Rect, str, int]]) -> list[list[int]]:
+    """Group orphan text lines into columns by overlapping x-extents."""
+    ordered = sorted(range(len(cells)), key=lambda idx: cells[idx][0].x0)
+    columns: list[list[int]] = []
+    column_x1 = 0.0
+    for idx in ordered:
+        rect = cells[idx][0]
+        if columns and rect.x0 <= column_x1 + ORPHAN_COLUMN_GAP:
+            columns[-1].append(idx)
+            column_x1 = max(column_x1, rect.x1)
+        else:
+            columns.append([idx])
+            column_x1 = rect.x1
+    return columns
+
+
+def _orphan_side_columns(
+    cells: list[tuple[fitz.Rect, str, int]],
+    row_count: int,
+) -> list[list[str]] | None:
+    """Return per-row cell text for one side of a ruled table, or None."""
+    if not cells:
+        return None
+    covered_rows = {row_index for _rect, _text, row_index in cells}
+    if len(covered_rows) < max(2, math.ceil(row_count * ORPHAN_ROW_COVERAGE)):
+        return None
+    if any(len(text) > ORPHAN_CELL_MAX_CHARS for _rect, text, _row in cells):
+        return None
+
+    columns = _cluster_orphan_columns(cells)
+    table: list[list[str]] = [["" for _ in columns] for _ in range(row_count)]
+    for col_index, members in enumerate(columns):
+        for idx in sorted(members, key=lambda item: cells[item][0].x0):
+            rect, text, row_index = cells[idx]
+            current = table[row_index][col_index]
+            table[row_index][col_index] = f"{current} {text}".strip() if current else text
+    return table
+
+
+def _extend_ruled_table(
+    page: fitz.Page,
+    tab: object,
+    lines: list[tuple[fitz.Rect, str]],
+) -> tuple[fitz.Rect, str] | None:
+    """Re-attach columns that sit outside a partially ruled table's borders.
+
+    Statistical bulletins often rule only the middle columns; PyMuPDF then
+    returns a narrow table and the label and change columns fall out as loose
+    text. Text lines that share a row band with the table but lie fully to its
+    left or right are clustered into extra columns and prepended/appended.
+    """
+    try:
+        raw_rows = tab.extract() or []
+        row_rects = [fitz.Rect(row.bbox) for row in tab.rows]
+    except Exception:
+        return None
+    if len(raw_rows) < 2 or len(row_rects) != len(raw_rows):
+        return None
+
+    table_rect = fitz.Rect(tab.bbox)
+    left: list[tuple[fitz.Rect, str, int]] = []
+    right: list[tuple[fitz.Rect, str, int]] = []
+    for rect, text in lines:
+        if rect.y1 < table_rect.y0 - 2 or rect.y0 > table_rect.y1 + 2:
+            continue
+        center_y = (rect.y0 + rect.y1) / 2
+        row_index = next(
+            (
+                idx for idx, row_rect in enumerate(row_rects)
+                if row_rect.y0 - 2 <= center_y <= row_rect.y1 + 2
+            ),
+            None,
+        )
+        if row_index is None:
+            continue
+        if rect.x1 <= table_rect.x0 + 1:
+            left.append((rect, text, row_index))
+        elif rect.x0 >= table_rect.x1 - 1:
+            right.append((rect, text, row_index))
+        elif not (table_rect.x0 <= rect.x0 and rect.x1 <= table_rect.x1):
+            return None
+
+    left_cols = _orphan_side_columns(left, len(raw_rows))
+    right_cols = _orphan_side_columns(right, len(raw_rows))
+    if left_cols is None and right_cols is None:
+        return None
+
+    rows: list[list[object]] = []
+    for idx, row in enumerate(raw_rows):
+        merged: list[object] = []
+        if left_cols is not None:
+            merged.extend(left_cols[idx])
+        merged.extend(row)
+        if right_cols is not None:
+            merged.extend(right_cols[idx])
+        rows.append(merged)
+
+    markdown = _rows_to_markdown(_clean_table_rows(rows))
+    if not _is_valid_table_markdown(markdown):
+        return None
+
+    bbox = fitz.Rect(table_rect)
+    for rect, _text, _row in (left if left_cols is not None else []) + (right if right_cols is not None else []):
+        bbox |= rect
+    return bbox, markdown
+
+
+def _merge_word_runs(words: list[tuple]) -> list[dict[str, object]]:
+    """Group PyMuPDF words into row-level text runs."""
+    rows: list[list[tuple]] = []
+    for word in sorted(words, key=lambda item: (item[1], item[0])):
+        if not rows or abs(rows[-1][0][1] - word[1]) > 4:
+            rows.append([word])
+        else:
+            rows[-1].append(word)
+
+    runs = []
+    for row in rows:
+        row_runs = []
+        for word in sorted(row, key=lambda item: item[0]):
+            x0, y0, x1, y1, text = word[:5]
+            if row_runs and x0 - row_runs[-1]["x1"] <= 8:
+                row_runs[-1]["x1"] = x1
+                row_runs[-1]["y0"] = min(row_runs[-1]["y0"], y0)
+                row_runs[-1]["y1"] = max(row_runs[-1]["y1"], y1)
+                row_runs[-1]["text"] = f"{row_runs[-1]['text']} {text}"
+            else:
+                row_runs.append({
+                    "x0": x0,
+                    "y0": y0,
+                    "x1": x1,
+                    "y1": y1,
+                    "text": text,
+                })
+        runs.extend(row_runs)
+    return runs
+
+
+def _cluster_word_columns(runs: list[dict[str, object]]) -> list[float]:
+    """Infer stable table columns from word-run centers."""
+    centers = sorted((float(run["x0"]) + float(run["x1"])) / 2 for run in runs)
+    columns: list[float] = []
+    for center in centers:
+        if not columns or abs(center - columns[-1]) > 14:
+            columns.append(center)
+        else:
+            columns[-1] = (columns[-1] + center) / 2
+    return columns
+
+
+def _word_runs_to_rows(
+    runs: list[dict[str, object]],
+    columns: list[float],
+) -> list[list[str]]:
+    """Place word runs into inferred columns and return table rows."""
+    row_groups: list[list[dict[str, object]]] = []
+    for run in sorted(runs, key=lambda item: (float(item["y0"]), float(item["x0"]))):
+        if not row_groups or abs(float(row_groups[-1][0]["y0"]) - float(run["y0"])) > 4:
+            row_groups.append([run])
+        else:
+            row_groups[-1].append(run)
+
+    rows = []
+    for group in row_groups:
+        row = [""] * len(columns)
+        for run in group:
+            center = (float(run["x0"]) + float(run["x1"])) / 2
+            col_index = min(range(len(columns)), key=lambda idx: abs(columns[idx] - center))
+            text = _normalize_table_cell(run["text"])
+            row[col_index] = f"{row[col_index]} {text}".strip() if row[col_index] else text
+        rows.append(row)
+    return rows
+
+
+def _words_to_markdown_table(
+    page: fitz.Page,
+    clip: fitz.Rect,
+) -> tuple[fitz.Rect, str] | None:
+    """Build a simple table from word coordinates inside a clipped region."""
+    words = page.get_text("words", clip=clip)
+    if len(words) < 6:
+        return None
+
+    runs = _merge_word_runs(words)
+    if len(runs) < 6:
+        return None
+
+    columns = _cluster_word_columns(runs)
+    if len(columns) < 3:
+        return None
+
+    rows = _word_runs_to_rows(runs, columns)
+    cleaned_rows = _clean_table_rows(rows)
+    markdown = _rows_to_markdown(cleaned_rows)
+    if not _is_valid_table_markdown(markdown):
+        return None
+
+    x0 = min(float(run["x0"]) for run in runs)
+    y0 = min(float(run["y0"]) for run in runs)
+    x1 = max(float(run["x1"]) for run in runs)
+    y1 = max(float(run["y1"]) for run in runs)
+    return fitz.Rect(x0, y0, x1, y1), markdown
+
+
+def _find_tables_in_clip(
+    page: fitz.Page,
+    clip: fitz.Rect,
+) -> list[object]:
+    """Find text-strategy tables inside a clipped page region."""
+    if clip.height < 20 or clip.width < 80:
+        return []
+    try:
+        return list(page.find_tables(strategy="text", clip=clip))
+    except Exception:
+        return []
+
+
+def find_page_tables(
+    page: fitz.Page,
+    include_top_continuation: bool = False,
+) -> tuple[list[dict[str, object]], bool]:
+    """Find line-detected tables plus caption-guided text tables on one page."""
+    candidates: list[dict[str, object]] = []
+    lines = _extract_text_lines(page)
+    try:
+        for tab in page.find_tables():
+            extended = _extend_ruled_table(page, tab, lines)
+            if extended is None:
+                _add_table_candidate(candidates, tab, "lines")
+                continue
+            bbox, markdown = extended
+            _append_table_markdown_candidate(candidates, bbox, markdown, "lines+text")
+    except Exception:
+        pass
+
+    for rect, text in lines:
+        if not _is_table_caption(text):
+            continue
+        start_y = _caption_table_start_y(rect, lines)
+        bottom_y = _table_region_bottom(page, lines, start_y)
+        clip = fitz.Rect(0, start_y, page.rect.width, bottom_y)
+        for tab in _find_tables_in_clip(page, clip):
+            _add_table_candidate(candidates, tab, "caption-text")
+        word_table = _words_to_markdown_table(page, clip)
+        if word_table:
+            bbox, markdown = word_table
+            _append_table_markdown_candidate(
+                candidates,
+                bbox,
+                markdown,
+                "caption-words",
+                replace_narrow=True,
+            )
+
+    if include_top_continuation:
+        start_y = page.rect.height * 0.08
+        bottom_y = _table_region_bottom(page, lines, start_y)
+        clip = fitz.Rect(0, start_y, page.rect.width, bottom_y)
+        for tab in _find_tables_in_clip(page, clip):
+            _add_table_candidate(candidates, tab, "continuation-text")
+        word_table = _words_to_markdown_table(page, clip)
+        if word_table:
+            bbox, markdown = word_table
+            _append_table_markdown_candidate(
+                candidates,
+                bbox,
+                markdown,
+                "continuation-words",
+                replace_narrow=True,
+            )
+
+    candidates.sort(key=lambda candidate: candidate["bbox"].y0)
+    table_continues = any(
+        isinstance(candidate["bbox"], fitz.Rect)
+        and candidate["bbox"].y1 >= page.rect.height * TABLE_CONTINUATION_Y_RATIO
+        for candidate in candidates
+    )
+    return candidates, table_continues
+
+
+def _is_markdown_table_line(line: str) -> bool:
+    """Return whether a Markdown line belongs to a pipe table."""
+    return line.startswith("|")
+
+
+def _is_markdown_separator_line(line: str) -> bool:
+    """Return whether a Markdown table line is the separator row."""
+    cells = [cell.strip() for cell in line.strip("|").split("|")]
+    return bool(cells) and all(cell and set(cell) <= {"-", ":"} for cell in cells)
+
+
+def _compatible_table_headers(first: list[str], second: list[str]) -> bool:
+    """Return whether two Markdown table blocks have the same flattened header."""
+    if len(first) < 2 or len(second) < 2:
+        return False
+    if not _is_markdown_separator_line(first[1]) or not _is_markdown_separator_line(second[1]):
+        return False
+    return first[0] == second[0] and _markdown_col_count(first[0]) > 2
+
+
+def _is_page_marker(text: str) -> bool:
+    """Return whether a stripped line is the converter's page-break marker."""
+    return text.startswith("<!-- Page ") and text.endswith("-->")
+
+
+def _is_table_continuation_gap(lines: list[str]) -> bool:
+    """Return whether only page-break furniture separates two table parts.
+
+    A bare number is a printed page number only when the gap crosses a
+    ``<!-- Page N -->`` marker; anywhere else it is content (a quantity, a year).
+    """
+    texts = [line.strip() for line in lines if line.strip()]
+    if not any(_is_page_marker(text) for text in texts):
+        return not texts
+    return all(
+        _is_page_marker(text) or PRINTED_PAGE_NUMBER_RE.fullmatch(text)
+        for text in texts
+    )
+
+
+def _read_markdown_table_block(lines: list[str], start: int) -> tuple[list[str], int]:
+    """Read a contiguous Markdown table block from ``start``."""
+    end = start
+    while end < len(lines) and _is_markdown_table_line(lines[end]):
+        end += 1
+    return lines[start:end], end
+
+
+def merge_markdown_continuation_tables(markdown: str) -> str:
+    """Merge split cross-page Markdown tables with repeated headers."""
+    lines = markdown.splitlines()
+    result = []
+    index = 0
+
+    while index < len(lines):
+        if not _is_markdown_table_line(lines[index]):
+            result.append(lines[index])
+            index += 1
+            continue
+
+        table, index = _read_markdown_table_block(lines, index)
+        while True:
+            next_start = index
+            while next_start < len(lines) and not _is_markdown_table_line(lines[next_start]):
+                next_start += 1
+            if next_start >= len(lines) or not _is_table_continuation_gap(lines[index:next_start]):
+                break
+
+            next_table, next_end = _read_markdown_table_block(lines, next_start)
+            if not _compatible_table_headers(table, next_table):
+                break
+
+            table.extend(next_table[2:])
+            index = next_end
+
+        result.extend(table)
+
+    return "\n".join(result)
+
+
 def merge_adjacent_formatting(text: str) -> str:
     """Merge adjacent same-style formatted spans split across PDF tokens.
 
@@ -720,15 +1479,6 @@ def merge_adjacent_formatting(text: str) -> str:
     return text
 
 
-def normalize_emphasis_boundaries(text: str) -> str:
-    """Add spacing after emphasized labels so CommonMark closes the marker."""
-    label_end = r"[:：;；,，、。]"
-    following_text = r"(?=[\u3400-\u9fffA-Za-z0-9])"
-    text = re.sub(rf"(\*{{3}}[^\n*]+{label_end}\*{{3}}){following_text}", r"\1 ", text)
-    text = re.sub(rf"(\*{{2}}[^\n*]+{label_end}\*{{2}}){following_text}", r"\1 ", text)
-    return text
-
-
 def is_sentence_end(text: str) -> bool:
     """Check if the text ends with sentence-ending punctuation."""
     text = text.rstrip()
@@ -738,44 +1488,11 @@ def is_sentence_end(text: str) -> bool:
     return text[-1] in end_puncts
 
 
-def starts_structural_label(text: str) -> bool:
-    """Return whether a line starts a new labeled section or field."""
-    stripped = text.strip()
-    return bool(re.match(
-        r"^(?:\*\*)?(?:问题\s*\d*|回复|收\s*件\s*人|发\s*件\s*人|邮\s*箱|日\s*期|电\s*话|编\s*号|总\s*页\s*数|主\s*题|标段编号)",
-        stripped,
-    ))
-
-
-def join_wrapped_lines(current: str, next_line: str) -> str:
-    """Join wrapped PDF lines without inserting spaces inside CJK words."""
-    current = current.rstrip()
-    next_line = next_line.lstrip()
-    if not current:
-        return next_line
-    if not next_line:
-        return current
-
-    cjk = r"[\u3400-\u9fff]"
-    if current.endswith("**") and next_line.startswith("**"):
-        left = current[:-2].rstrip()
-        right = next_line[2:].lstrip()
-        if re.search(cjk + r"$", left) and re.match(cjk, right):
-            return left + right
-        return left + " " + right
-
-    if re.search(cjk + r"$", current) and re.match(cjk, next_line):
-        return current + next_line
-    return current + " " + next_line
-
-
 def should_merge_lines(current: dict, next_line: dict) -> bool:
     """Determine if two lines should be merged into the same paragraph."""
     if current.get("is_heading") or next_line.get("is_heading"):
         return False
     if current.get("is_list") or next_line.get("is_list"):
-        return False
-    if starts_structural_label(next_line.get("content", "")):
         return False
     if is_sentence_end(current.get("content", "")):
         return False
@@ -786,19 +1503,21 @@ def extract_pdf_to_markdown(
     pdf_path: str,
     output_path: str = None,
     images: str = "all",
-    raw: bool = False,
     render_vector_figures: bool = False,
     vector_figure_dpi: int = VECTOR_FIGURE_DPI,
+    raw: bool = False,
 ) -> str:
     """Extract text, images, and tables from a PDF and convert to Markdown.
 
-    images: "all" = extract without filtering (default),
-            "filtered" = extract with size/quality filters,
-            "none" = skip all images
-    raw: When True, faithfully reproduce the PDF — skip header/footer dedup
-         and font-size-based heading detection. Useful for archival fidelity.
-    render_vector_figures: Rasterize large vector drawing regions as PNG assets.
-    vector_figure_dpi: DPI used for rendered vector figure PNGs.
+    Args:
+        pdf_path: Path to the PDF file.
+        output_path: Optional output path for the Markdown file.
+        images: Image extraction mode.
+            "filtered" = apply size/quality filters (default),
+            "all"      = extract all images without filtering,
+            "none"     = skip all images.
+        render_vector_figures: Rasterize large vector drawing regions as PNGs.
+        vector_figure_dpi: DPI used for rendered vector figure PNGs.
     """
     try:
         doc = fitz.open(pdf_path)
@@ -814,22 +1533,19 @@ def extract_pdf_to_markdown(
     filename = Path(pdf_path).stem
     title = re.sub(r'^\d+-', '', filename).strip()
 
-    if raw:
-        print(f"[INFO] Raw mode — heading detection and header/footer dedup disabled")
-        size_map = {}  # No heading detection — every line is body text
-        noise_texts = set()  # No header/footer dedup
-    else:
-        print(f"[INFO] Analyzing document structure...")
-        size_map = analyze_font_sizes(doc)
-        print(f"   Font size mapping: body={size_map.get('body', 'N/A')}, " +
-              f"H1={size_map.get('h1', 'N/A')}, H2={size_map.get('h2', 'N/A')}, H3={size_map.get('h3', 'N/A')}")
+    print(f"[INFO] Analyzing document structure...")
+    size_map = {} if raw else analyze_font_sizes(doc)
+    print(f"   Font size mapping: body={size_map.get('body', 'N/A')}, " +
+          f"H1={size_map.get('h1', 'N/A')}, H2={size_map.get('h2', 'N/A')}, H3={size_map.get('h3', 'N/A')}")
 
-        print(f"[INFO] Detecting repeated headers/footers...")
-        noise_texts = detect_headers_footers(doc)
-        if noise_texts:
-            print(f"   Found {len(noise_texts)} repeated noise texts (will be removed):")
-            for t in list(noise_texts)[:3]:
-                print(f"     - {t[:30]}...")
+    print(f"[INFO] Detecting repeated headers/footers...")
+    header_noise, footer_noise = (set(), set()) if raw else detect_headers_footers(doc)
+    noise_by_band = {"header": header_noise, "footer": footer_noise, None: set()}
+    repeated_texts = header_noise | footer_noise
+    if repeated_texts:
+        print(f"   Found {len(repeated_texts)} repeated noise texts (will be removed):")
+        for t in list(repeated_texts)[:3]:
+            print(f"     - {t[:30]}...")
 
     markdown_content = f"# {title}\n\n"
     seen_image_hashes = set()  # Track seen image hashes for deduplication
@@ -843,42 +1559,44 @@ def extract_pdf_to_markdown(
 
     img_count = 0
     image_manifest: list[dict[str, object]] = []
+    previous_table_continues = False
 
     for page_num, page in enumerate(doc, 1):
-        page_img_count = 0
         if page_num > 1:
             # Add page break marker to help LLM understand context segmentation
             markdown_content += f"\n\n<!-- Page {page_num} -->\n\n"
 
-        try:
-            table_finder = page.find_tables()
-            raw_tables = list(getattr(table_finder, "tables", table_finder))
-        except Exception:
-            raw_tables = []
-
-        accepted_tables = []
-        for tab in raw_tables:
-            if should_emit_pdf_table(tab):
-                accepted_tables.append(tab)
-            else:
-                rows, cols, nonempty, density, _ = table_shape_stats(tab)
-                print(
-                    f"  [SKIP] Ignored low-confidence table on P{page_num}: "
-                    f"{rows}x{cols}, nonempty={nonempty}, density={density:.2f}"
-                )
-
-        tab_rects = [fitz.Rect(t.bbox) for t in accepted_tables]
+        table_candidates, previous_table_continues = find_page_tables(
+            page,
+            include_top_continuation=previous_table_continues,
+        )
+        tab_rects = [
+            candidate["bbox"]
+            for candidate in table_candidates
+            if isinstance(candidate["bbox"], fitz.Rect)
+        ]
 
         page_elements = []
-        image_rects: list[fitz.Rect] = []
 
-        for tab in accepted_tables:
+        for table in table_candidates:
+            bbox = table["bbox"]
+            if not isinstance(bbox, fitz.Rect):
+                continue
             page_elements.append({
-                **element_sort_fields(tab.bbox),
+                "y0": bbox.y0,
                 "type": 2,
-                "content": tab.to_markdown()
+                "content": table["content"]
             })
-            print(f"  [OK] Found table: P{page_num}")
+            print(f"  [OK] Found table: P{page_num} ({table['method']})")
+
+        if render_vector_figures and images != 'none':
+            for figure_rect in detect_vector_figure_rects(page, tab_rects):
+                page_elements.append({
+                    "y0": figure_rect.y0,
+                    "type": 3,
+                    "content": figure_rect,
+                })
+                print(f"  [OK] Found vector figure region: P{page_num} {tuple(round(v, 1) for v in figure_rect)}")
 
         blocks = page.get_text("dict")["blocks"]
 
@@ -899,7 +1617,8 @@ def extract_pdf_to_markdown(
             if block["type"] == 0:
                 # Check if this is noise text to be filtered (whole block match)
                 block_text_full = "".join([span["text"] for line in block["lines"] for span in line["spans"]]).strip()
-                if block_text_full in noise_texts:
+                block_band = _header_footer_band(block_rect, page.rect)
+                if block_text_full in noise_by_band[block_band]:
                     continue
 
                 for line in block["lines"]:
@@ -919,6 +1638,12 @@ def extract_pdf_to_markdown(
 
                         span_size = span["size"]
                         span_flags = span["flags"]
+
+                        # A bullet glyph set in its own larger span must not
+                        # promote the line to a heading; it is a list marker.
+                        if is_bullet_glyph_span(span_text):
+                            formatted_spans.append(span_text)
+                            continue
 
                         line_size = max(line_size, span_size)
                         line_flags |= span_flags
@@ -941,15 +1666,22 @@ def extract_pdf_to_markdown(
                         continue
 
                     # Secondary check: line-level noise match (sometimes blocks are split)
-                    if line_text in noise_texts:
+                    band = _header_footer_band(fitz.Rect(line["bbox"]), page.rect)
+                    if line_text in noise_by_band[band]:
                         continue
 
+                    if band == "footer":
+                        line_text = remove_page_footer(line_text)
+                        if not line_text:
+                            continue
+
                     line_text = merge_adjacent_formatting(line_text)
-                    line_text = normalize_emphasis_boundaries(line_text)
 
                     heading_level = get_heading_level(line_size, size_map, line_text, line_flags)
 
                     is_list, list_type, list_content = detect_list_item(line_text)
+                    if is_list and not list_content.split(' ', 1)[-1].strip():
+                        continue
 
                     if heading_level > 0:
                         prefix = '#' * heading_level + ' '
@@ -961,69 +1693,29 @@ def extract_pdf_to_markdown(
                         final_text = line_text
 
                     page_elements.append({
-                        **element_sort_fields(tuple(line["bbox"])),
+                        "y0": line["bbox"][1],
                         "type": 0,
                         "content": final_text,
                         "is_heading": heading_level > 0,
                         "is_list": is_list,
                         "is_code": is_code_line,
-                        "bbox": tuple(line["bbox"]),
+                        "is_footer": band == "footer",
                     })
 
             elif block["type"] == 1:
-                image_rects.append(block_rect)
                 if images == "none":
                     pass
                 elif images == "all" or should_keep_image(block, page.rect, seen_image_hashes):
                     page_elements.append({
-                        **element_sort_fields(tuple(block["bbox"])),
+                        "y0": block["bbox"][1],
                         "type": 1,
-                        "asset_kind": "raster",
                         "content": block
                     })
                 else:
                     w, h = block.get("width", 0), block.get("height", 0)
                     print(f"  [SKIP] Filtered small/decorative image: {w}x{h}px, {len(block.get('image', b''))} bytes")
 
-        rendered_vector_rects: list[fitz.Rect] = []
-        if images != "none" and render_vector_figures:
-            for rect in detect_vector_figure_rects(page):
-                vector_rect = fitz.Rect(rect)
-                if not should_keep_vector_rect(
-                    vector_rect,
-                    page.rect,
-                    tab_rects,
-                    image_rects,
-                    filtered=(images == "filtered"),
-                ):
-                    continue
-                if is_text_dominant_vector_rect(page, vector_rect):
-                    print(
-                        f"  [SKIP] Ignored text-dominant vector region on P{page_num}: "
-                        f"{vector_rect.width:.0f}x{vector_rect.height:.0f}"
-                    )
-                    continue
-                try:
-                    image_data = render_vector_rect(page, vector_rect, dpi=vector_figure_dpi)
-                except Exception as exc:
-                    print(f"  [WARN] Failed to render vector drawing on P{page_num}: {exc}")
-                    continue
-
-                page_elements.append({
-                    **element_sort_fields(vector_rect),
-                    "type": 1,
-                    "asset_kind": "vector",
-                    "content": {
-                        "bbox": tuple(vector_rect),
-                        "ext": "png",
-                        "image": image_data,
-                    },
-                })
-                rendered_vector_rects.append(vector_rect)
-
-        page_elements = remove_text_inside_vector_images(page_elements, rendered_vector_rects)
-
-        page_elements.sort(key=lambda x: (x["sort_y"], x["x0"]))
+        page_elements.sort(key=lambda x: x["y0"])
 
         # Merge adjacent same-level short headings
         page_elements = merge_adjacent_headings(page_elements)
@@ -1039,13 +1731,15 @@ def extract_pdf_to_markdown(
                     next_el = page_elements[j]
                     if next_el["type"] != 0:
                         break
+                    if el.get("is_footer") or next_el.get("is_footer"):
+                        break
                     if not should_merge_lines({"content": merged_content, "is_heading": False, "is_list": False}, next_el):
                         break
-                    merged_content = join_wrapped_lines(merged_content, next_el["content"])
+                    merged_content = join_wrapped_text(merged_content, next_el["content"])
                     j += 1
                 merged_elements.append({
                     "type": 0,
-                    "content": remove_page_footer(merged_content),
+                    "content": merged_content,
                     "is_heading": False,
                     "is_list": False
                 })
@@ -1115,30 +1809,23 @@ def extract_pdf_to_markdown(
                     prev_was_code = False
                 if img_dir:
                     block = el["content"]
-                    asset_kind = el.get("asset_kind", "raster")
                     ext = block["ext"]
                     image_data = block["image"]
                     safe_filename = filename.replace(" ", "_")
-                    page_img_count += 1
-                    image_name = f"{safe_filename}_p{page_num}_{page_img_count:03d}.{ext}"
+                    image_name = f"{safe_filename}_p{page_num}_{img_count}.{ext}"
                     image_path = img_dir / image_name
 
                     try:
                         img_dir.mkdir(parents=True, exist_ok=True)
-                        image_path.write_bytes(image_data)
+                        with open(image_path, "wb") as f:
+                            f.write(image_data)
 
                         if prev_was_list:
                             markdown_content += "\n"
                         markdown_content += f"![{image_name}]({rel_img_dir}/{image_name})\n\n"
                         width = int(block.get("width", 0) or 0)
                         height = int(block.get("height", 0) or 0)
-                        if asset_kind == "vector":
-                            bbox_rect = fitz.Rect(block.get("bbox", []))
-                            scale = vector_figure_dpi / 72
-                            width = int(round(bbox_rect.width * scale))
-                            height = int(round(bbox_rect.height * scale))
                         ratio = width / height if width > 0 and height > 0 else None
-                        source_kind = "pdf_vector_figure" if asset_kind == "vector" else "pdf_image"
                         image_manifest.append({
                             "index": len(image_manifest) + 1,
                             "filename": image_name,
@@ -1146,7 +1833,7 @@ def extract_pdf_to_markdown(
                             "asset_kind": "bitmap",
                             "svg_renderable": True,
                             "pptx_native_supported": True,
-                            "source_kind": source_kind,
+                            "source_kind": "pdf_image",
                             "source_ext": f".{ext}",
                             "page_index": page_num,
                             "occurrence_index": img_count + 1,
@@ -1159,16 +1846,70 @@ def extract_pdf_to_markdown(
                         })
                         img_count += 1
                         prev_was_list = False
-                        print(f"  [OK] Extracted {asset_kind} image: {image_name}")
+                        print(f"  [OK] Extracted image: {image_name}")
                     except Exception as e:
                         print(f"  [WARN] Failed to save image: {e}")
+
+            elif el["type"] == 3:
+                if prev_was_code:
+                    flush_code_block()
+                    prev_was_code = False
+                if img_dir:
+                    figure_rect = el["content"]
+                    safe_filename = filename.replace(" ", "_")
+                    image_name = f"{safe_filename}_p{page_num}_figure_{img_count}.png"
+                    image_path = img_dir / image_name
+
+                    try:
+                        img_dir.mkdir(parents=True, exist_ok=True)
+                        scale = vector_figure_dpi / 72
+                        pix = page.get_pixmap(
+                            matrix=fitz.Matrix(scale, scale),
+                            clip=figure_rect,
+                            alpha=False,
+                        )
+                        pix.save(str(image_path))
+
+                        if prev_was_list:
+                            markdown_content += "\n"
+                        markdown_content += f"![{image_name}]({rel_img_dir}/{image_name})\n\n"
+                        ratio = pix.width / pix.height if pix.width > 0 and pix.height > 0 else None
+                        image_manifest.append({
+                            "index": len(image_manifest) + 1,
+                            "filename": image_name,
+                            "original_filename": image_name,
+                            "asset_kind": "bitmap",
+                            "svg_renderable": True,
+                            "pptx_native_supported": True,
+                            "source_kind": "pdf_vector_figure",
+                            "source_ext": ".png",
+                            "page_index": page_num,
+                            "occurrence_index": img_count + 1,
+                            "pixel_width": pix.width,
+                            "pixel_height": pix.height,
+                            "pixel_ratio": round(ratio, 6) if ratio else None,
+                            "display_ratio": round(ratio, 6) if ratio else None,
+                            "bbox": [
+                                figure_rect.x0,
+                                figure_rect.y0,
+                                figure_rect.x1,
+                                figure_rect.y1,
+                            ],
+                        })
+                        img_count += 1
+                        prev_was_list = False
+                        print(f"  [OK] Rendered vector figure: {image_name}")
+                    except Exception as e:
+                        print(f"  [WARN] Failed to render vector figure: {e}")
 
         # Flush code block at end of page
         if prev_was_code:
             flush_code_block()
 
+    page_count = len(doc)
     doc.close()
 
+    markdown_content = merge_markdown_continuation_tables(markdown_content)
     markdown_content = CONTROL_CHARS_RE.sub('', markdown_content)
     markdown_content = re.sub(r'\n{3,}', '\n\n', markdown_content)
     markdown_content = markdown_content.strip() + "\n"
@@ -1182,67 +1923,37 @@ def extract_pdf_to_markdown(
                 json.dumps(image_manifest, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
+        warnings = scanned_pdf_warnings(markdown_content, page_count, img_count)
+        warnings += arabic_text_layer_warnings(markdown_content)
+        for warning in warnings:
+            print(f"[WARN] {warning}")
+        profile_path = write_conversion_profile_best_effort(
+            input_path=pdf_path,
+            markdown_path=output_path,
+            converter="pdf_to_md.py",
+            conversion_type="pdf",
+            asset_dir=img_dir,
+            warnings=warnings,
+        )
         print(f"[OK] Saved Markdown to: {output_path}")
+        if profile_path:
+            print(f"   Wrote conversion profile -> {profile_path}")
 
     return markdown_content
 
 
-def process_directory(
-    input_dir: str,
-    output_dir: str | None = None,
-    images: str = "all",
-    raw: bool = False,
-    render_vector_figures: bool = False,
-    vector_figure_dpi: int = VECTOR_FIGURE_DPI,
-) -> int:
-    """Convert all PDFs in a directory to Markdown.
-
-    Args:
-        input_dir: Directory containing PDF files.
-        output_dir: Optional output directory for Markdown files.
-        images: Image extraction mode passed to extract_pdf_to_markdown.
-    """
-    input_path = Path(input_dir)
-
-    if output_dir:
-        output_path = Path(output_dir)
-    else:
-        output_path = input_path
-
-    pdf_files = sorted(input_path.glob('*.pdf'))
-
-    print(f"Found {len(pdf_files)} PDF files")
-    failures = 0
-
-    for pdf_file in pdf_files:
-        output_file = output_path / (pdf_file.stem + '.md')
-        print(f"Processing: {pdf_file.name}")
-        result = extract_pdf_to_markdown(
-            str(pdf_file),
-            str(output_file),
-            images=images,
-            raw=raw,
-            render_vector_figures=render_vector_figures,
-            vector_figure_dpi=vector_figure_dpi,
-        )
-        if not result:
-            failures += 1
-
-    return failures
-
-
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """Run the CLI entry point."""
     parser = argparse.ArgumentParser(
         description='PDF to Markdown converter (with structure detection and LLM optimization)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
-  python3 pdf_to_md.py book.pdf                    # Convert a single file
-  python3 pdf_to_md.py book.pdf -o output.md      # Specify output file
-  python3 pdf_to_md.py book.pdf --render-vector-figures
-  python3 pdf_to_md.py ./pdfs                      # Convert all PDFs in directory
-  python3 pdf_to_md.py ./pdfs -o ./markdown       # Specify output directory
+  python pdf_to_md.py book.pdf                    # Convert a single file
+  python pdf_to_md.py book.pdf appendix.pdf       # Convert multiple files
+  python pdf_to_md.py ./pdfs -o ./markdown        # Convert PDFs in a directory
+  python pdf_to_md.py book.pdf -o output.md      # Specify output file
+  python pdf_to_md.py book.pdf --render-vector-figures
 
 Structure detection features:
   - Auto-detect heading levels (based on font size)
@@ -1254,28 +1965,17 @@ Structure detection features:
 '''
     )
 
-    parser.add_argument('input', help='PDF file or directory containing PDFs')
-    parser.add_argument('-o', '--output', help='Output file or directory')
+    parser.add_argument('inputs', nargs='+', help='PDF file(s) or directories')
+    parser.add_argument(
+        '-o',
+        '--output',
+        help='Output Markdown file for one input, or output directory for multiple inputs/directories',
+    )
     parser.add_argument(
         '--images',
         choices=['all', 'filtered', 'none'],
         default='all',
-        help='Image extraction mode: all=no filtering (default), filtered=apply size/quality filters, none=skip images',
-    )
-    parser.add_argument(
-        '--filter-images',
-        action='store_true',
-        help='Alias for --images filtered (matches convert.py convention)',
-    )
-    parser.add_argument(
-        '--no-images',
-        action='store_true',
-        help='Alias for --images none (matches convert.py convention)',
-    )
-    parser.add_argument(
-        '--raw',
-        action='store_true',
-        help='Faithful reproduction: skip header/footer dedup and heading detection',
+        help='Image extraction mode: filtered=apply size filters, all=no filtering (default), none=skip images',
     )
     parser.add_argument(
         '--render-vector-figures',
@@ -1289,45 +1989,33 @@ Structure detection features:
         help=f'DPI for --render-vector-figures output (default: {VECTOR_FIGURE_DPI})',
     )
 
-    args = parser.parse_args()
+    image_options = parser.add_mutually_exclusive_group()
+    image_options.add_argument("--no-images", action="store_true", help="Skip image extraction and references")
+    image_options.add_argument("--filter-images", action="store_true", help="Filter decorative images by size and aspect ratio")
+    parser.add_argument("--raw", action="store_true", help="Disable heuristic cleaning where supported")
 
-    # Resolve --images / --filter-images / --no-images precedence
-    if args.no_images and args.filter_images:
-        print("Error: --no-images and --filter-images are mutually exclusive.")
-        return 2
-    images = args.images
+    args = parser.parse_args(argv)
     if args.no_images:
-        images = 'none'
+        args.images = 'none'
     elif args.filter_images:
-        images = 'filtered'
+        args.images = 'filtered'
 
-    input_path = Path(args.input)
-
-    if input_path.is_file():
-        output = args.output or str(input_path.with_suffix('.md'))
-        result = extract_pdf_to_markdown(
-            str(input_path),
-            output,
-            images=images,
-            raw=args.raw,
-            render_vector_figures=args.render_vector_figures,
-            vector_figure_dpi=args.vector_figure_dpi,
-        )
-        return 0 if result else 1
-    elif input_path.is_dir():
-        failures = process_directory(
-            str(input_path),
-            args.output,
-            images=images,
-            raw=args.raw,
-            render_vector_figures=args.render_vector_figures,
-            vector_figure_dpi=args.vector_figure_dpi,
-        )
-        return 0 if failures == 0 else 1
-    else:
-        print(f"Error: File or directory not found: {args.input}")
-        return 1
+    return run_path_batch(
+        args.inputs,
+        {'.pdf'},
+        args.output,
+        lambda source, output: bool(
+            extract_pdf_to_markdown(
+                str(source),
+                str(output),
+                images=args.images,
+                raw=args.raw,
+                render_vector_figures=args.render_vector_figures,
+                vector_figure_dpi=args.vector_figure_dpi,
+            )
+        ),
+    )
 
 
 if __name__ == '__main__':
-    exit(main())
+    raise SystemExit(main())
