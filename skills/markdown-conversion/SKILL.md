@@ -43,7 +43,7 @@ description: >
 
 维度 B：图片处理（互斥三选一）
   默认           = 全部保留
-  --filter-images = 过滤装饰图（logo、追踪像素、母版背景、低信息密度色块、重复图）
+  --filter-images = 按尺寸和宽高比过滤装饰小图；保留重复出现位置，不以压缩率判断正文图
   --no-images    = 完全不抽图，Markdown 里也不留 ![](...) 引用
 ```
 
@@ -175,6 +175,17 @@ MinerU 需要 `MINERU_API_TOKEN`，或将 `resources/config.example.json` 复制
 ```bash
 python3 scripts/check_env.py    # 按格式显示就绪状态：Python 依赖、pandoc、MinerU token
 ```
+
+## 回归测试
+
+离线回归测试使用合成输入，MinerU 下载由本地 ZIP 模拟，不访问网络（需 Pillow、requests）：
+
+```bash
+cd skills/markdown-conversion
+python3 -m unittest discover -s tests
+```
+
+MinerU ZIP 包含多份 Markdown 时，主输出沿用第一份；其余文件保留在原始解包目录，并通过 stderr 警告列出路径，供核对分片或替代版本。
 
 ## 安装
 

@@ -25,23 +25,59 @@ from _image_filter import should_keep_image_bytes  # noqa: E402
 _IMAGE_REF_RE = re.compile(r'!\[[^\]]*\]\((?P<src>[^)]*)\)')
 
 
-def strip_image_refs(markdown: str) -> str:
-    """Remove all ![alt](src) image references from Markdown.
+def _strip_image_refs(markdown: str, filenames: set[str] | None = None) -> str:
+    """Strip image references outside code; retain ambiguous container lines."""
+    def strip_prose(text: str) -> str:
+        # Matching backtick runs also protect inline code spanning multiple lines.
+        code = re.compile(r"(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)")
 
-    Drops image-only lines entirely (avoids blank line scars) and removes
-    inline image refs from text lines.
-    """
-    cleaned_lines: list[str] = []
-    for line in markdown.splitlines():
-        stripped = _IMAGE_REF_RE.sub("", line)
-        # If the original line was just image refs (now whitespace), drop it.
-        if line.strip() and not stripped.strip():
-            continue
-        cleaned_lines.append(stripped)
-    # Collapse 3+ blank lines into 2 to tidy up.
-    text = "\n".join(cleaned_lines)
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    return text
+        def strip_segment(segment: str) -> str:
+            def replace(match: re.Match) -> str:
+                prefix = segment[:match.start()]
+                backslashes = len(prefix) - len(prefix.rstrip("\\"))
+                if backslashes % 2:
+                    return match.group(0)
+                if filenames is None or image_ref_filename(match.group("src")) in filenames:
+                    return ""
+                return match.group(0)
+            return _IMAGE_REF_RE.sub(replace, segment)
+
+        result = []
+        start = 0
+        for match in code.finditer(text):
+            result.extend((strip_segment(text[start:match.start()]), match.group(0)))
+            start = match.end()
+        result.append(strip_segment(text[start:]))
+        return "".join(result)
+
+    result = []
+    prose = []
+    fence = None
+    for line in markdown.splitlines(keepends=True):
+        marker = re.match(r"^ {0,3}(?:(?:[-+*]|\d+[.)])\s+)?(`{3,}|~{3,})(.*)$",
+                          line.rstrip("\r\n"))
+        protected = (fence is not None or marker is not None
+                     or line.startswith(("    ", "\t")) or re.match(r"^\s*>", line))
+        if protected:
+            if prose:
+                result.append(strip_prose("".join(prose)))
+                prose = []
+            result.append(line)
+            if fence is not None:
+                if (marker and marker[1][0] == fence[0]
+                        and len(marker[1]) >= len(fence) and not marker[2].strip()):
+                    fence = None
+            elif marker:
+                fence = marker[1]
+        else:
+            prose.append(line)
+    result.append(strip_prose("".join(prose)))
+    return "".join(result)
+
+
+def strip_image_refs(markdown: str) -> str:
+    """Remove image references while preserving code and escaped literals."""
+    return _strip_image_refs(markdown)
 
 
 def image_ref_filename(src: str) -> str:
@@ -56,17 +92,7 @@ def image_ref_filename(src: str) -> str:
 
 def strip_image_refs_by_filenames(markdown: str, filenames: set[str]) -> str:
     """Remove Markdown image refs whose target basename is in filenames."""
-    cleaned_lines: list[str] = []
-    for line in markdown.splitlines():
-        stripped = _IMAGE_REF_RE.sub(
-            lambda match: "" if image_ref_filename(match.group("src")) in filenames else match.group(0),
-            line,
-        )
-        if line.strip() and not stripped.strip():
-            continue
-        cleaned_lines.append(stripped)
-    text = "\n".join(cleaned_lines)
-    return re.sub(r'\n{3,}', '\n\n', text)
+    return _strip_image_refs(markdown, filenames)
 
 
 def load_config() -> dict[str, object]:
@@ -434,7 +460,7 @@ class MinerUClient:
             output_filename: Output filename (without extension); defaults to the original name.
             extract_md: Whether to extract only Markdown files.
             no_images: When True, drop the images folder and strip image references from the Markdown.
-            filter_images: When True, drop decorative / duplicate images from the synced images folder.
+            filter_images: When True, drop images rejected by size/aspect checks from the synced images folder.
 
         Returns:
             Markdown file path or output directory.
@@ -481,8 +507,16 @@ class MinerUClient:
             md_files = [f for f in zf.namelist() if f.endswith('.md')]
             final_md_path = None
             if md_files:
-                # Only process the first MD file found
+                # Preserve the existing primary output contract; warn about other files.
                 md_rel_path = md_files[0]
+                if len(md_files) > 1:
+                    retained = ", ".join(str(extract_dir / name) for name in md_files[1:])
+                    print(
+                        f"[WARN] ZIP contains {len(md_files)} Markdown files; "
+                        f"only {md_rel_path} enters the primary output. "
+                        f"Additional files preserved for review: {retained}",
+                        file=sys.stderr,
+                    )
                 source_md = extract_dir / md_rel_path
 
                 # Use the PDF stem as the target filename

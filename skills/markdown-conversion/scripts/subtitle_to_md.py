@@ -7,6 +7,7 @@ Strips timestamps and outputs clean transcript text.
 
 import argparse
 import re
+import sys
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -49,20 +50,19 @@ class HTMLTextExtractor(HTMLParser):
 
 def html_to_text(content: str) -> str:
     """Convert HTML to plain text, handling entities and block-level structure."""
-    content = content.replace('&nbsp;', ' ')
-    content = content.replace('&amp;', '&')
-    content = content.replace('&lt;', '<')
-    content = content.replace('&gt;', '>')
-    content = content.replace('&quot;', '"')
-    
     parser = HTMLTextExtractor()
     try:
         parser.feed(content)
         return parser.get_text()
-    except Exception:
-        text = re.sub(r'<[^>]+>', ' ', content)
-        return re.sub(r'\s+', ' ', text).strip()
+    except Exception as exc:
+        print(f"[WARN] HTML parsing failed; preserving source: {exc}", file=sys.stderr)
+        return content
 
+
+_TIMESTAMP_PATTERN = r'(?:\d+:)?\d{1,2}:\d{1,2}(?:[,.]\d{1,3})?'
+_TIMING_RE = re.compile(
+    rf'^\s*{_TIMESTAMP_PATTERN}\s*-->\s*{_TIMESTAMP_PATTERN}(?:\s+.*)?\s*$'
+)
 
 BLOCK_SIZE = 50  # Insert a <!-- Block N --> anchor every N subtitle entries
 
@@ -100,15 +100,14 @@ def process_srt_content(content: str, raw: bool = False) -> str:
     i = 0
 
     while i < len(lines):
-        if i < len(lines) and '-->' in lines[i]:
+        if _TIMING_RE.fullmatch(lines[i]):
             timestamp = lines[i].split('-->')[0].strip()
             i += 1
             while i < len(lines) and not lines[i].strip():
                 i += 1
             text_chunk = []
-            while i < len(lines) and lines[i].strip() and '-->' not in lines[i]:
-                if not lines[i].strip().isdigit():
-                    text_chunk.append(lines[i].strip())
+            while i < len(lines) and lines[i].strip() and not _TIMING_RE.fullmatch(lines[i]):
+                text_chunk.append(lines[i].strip())
                 i += 1
             if text_chunk:
                 chunks.append((timestamp, ' '.join(text_chunk)))
@@ -126,7 +125,8 @@ def process_vtt_content(content: str, raw: bool = False) -> str:
     for i, line in enumerate(lines):
         if line.strip() == 'WEBVTT' or line.startswith('WEBVTT '):
             start_index = i + 1
-            while start_index < len(lines) and (lines[start_index].strip() == '' or ':' in lines[start_index]):
+            while (start_index < len(lines) and lines[start_index].strip()
+                   and not _TIMING_RE.fullmatch(lines[start_index])):
                 start_index += 1
             break
 
@@ -134,11 +134,11 @@ def process_vtt_content(content: str, raw: bool = False) -> str:
     i = start_index
 
     while i < len(lines):
-        if i < len(lines) and '-->' in lines[i]:
+        if _TIMING_RE.fullmatch(lines[i]):
             timestamp = lines[i].split('-->')[0].strip()
             i += 1
             text_chunk = []
-            while i < len(lines) and lines[i].strip() and '-->' not in lines[i]:
+            while i < len(lines) and lines[i].strip() and not _TIMING_RE.fullmatch(lines[i]):
                 text_chunk.append(lines[i].strip())
                 i += 1
             if text_chunk:
@@ -298,11 +298,11 @@ def convert_subtitles(input_dir: str, output_dir: str | None = None, include_htm
 
     out_path.mkdir(parents=True, exist_ok=True)
 
+    generated = 0
     if collect_input_files(root_path, include_html):
-        rc = convert_flat_directory(root_path, out_path, include_html, raw=raw)
-        if rc == 0:
-            print(f"[OK] Done. Output: {out_path}")
-        return rc
+        if convert_flat_directory(root_path, out_path, include_html, raw=raw) == 0:
+            generated += 1
+    used_outputs = {p.name for p in out_path.glob('*.md')}
 
     output_dir_resolved = out_path.resolve()
     chapter_dirs = [
@@ -311,11 +311,10 @@ def convert_subtitles(input_dir: str, output_dir: str | None = None, include_htm
     ]
     chapter_dirs.sort(key=natural_sort_key)
 
-    if not chapter_dirs:
+    if not chapter_dirs and not generated:
         print(f"[ERROR] No subtitle files or chapter subdirectories found in: {input_dir}")
         return 1
 
-    generated = 0
     for chapter_dir in chapter_dirs:
         chapter_name = chapter_dir.name
         print(f"[INFO] Processing chapter: {chapter_name}")
@@ -340,7 +339,7 @@ def convert_subtitles(input_dir: str, output_dir: str | None = None, include_htm
 
             markdown_content += f"## {file_name}\n\n{processed_content}\n\n"
 
-        markdown_path = out_path / f"{chapter_name}.md"
+        markdown_path = reserve_output_path(chapter_dir, out_path, used_outputs)
         with open(markdown_path, 'w', encoding='utf-8') as md_file:
             md_file.write(markdown_content)
 
